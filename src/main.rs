@@ -1,4 +1,5 @@
 mod allocator;
+mod dcel;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct Point2D {
