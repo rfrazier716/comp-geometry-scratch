@@ -1,21 +1,30 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Deref};
 
 type AllocatorGeneration = u64;
 
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Default, std::cmp::Eq, Hash)]
 pub struct Key {
     pub index: usize,
     pub generation: AllocatorGeneration,
 }
-
-enum AllocatorSlot<T> {
+#[derive(Debug)]
+pub enum AllocatorSlot<T> {
     Free(AllocatorGeneration),
     Occupied(AllocatorGeneration, T),
 }
 
+#[derive(Debug)]
 pub struct Allocator<T> {
     elements: Vec<AllocatorSlot<T>>, // the stored data managed by the allocator
     free_slots: VecDeque<usize>,     // list of the open slots we can insert into
+}
+
+impl<T> Deref for Allocator<T> {
+    type Target = Vec<AllocatorSlot<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.elements
+    }
 }
 
 impl<T> Allocator<T> {
