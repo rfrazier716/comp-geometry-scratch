@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, ops::Deref};
+use std::{collections::VecDeque, iter::FilterMap, ops::Deref};
 
 type AllocatorGeneration = u64;
 
@@ -107,6 +107,26 @@ impl<T> Allocator<T> {
             Err(key)
         }
     }
+
+    pub fn iter_values(&self) -> impl Iterator<Item = &T> {
+        self.elements.iter().filter_map(|x| match x {
+            AllocatorSlot::Occupied(_, v) => Some(v),
+            _ => None,
+        })
+    }
+
+    pub fn iter_keys(&self) -> impl Iterator<Item = Key> + '_ {
+        self.elements
+            .iter()
+            .enumerate()
+            .filter_map(|(i, x)| match x {
+                AllocatorSlot::Occupied(gen, _) => Some(Key {
+                    index: i,
+                    generation: *gen,
+                }),
+                _ => None,
+            })
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +209,28 @@ mod tests {
                 index: 0
             }
         );
+    }
+
+    #[test]
+    fn test_iteration() {
+        let mut allocator = Allocator::new();
+        // fill it with some values
+        let keys: Vec<Key> = (0..10).map(|x| allocator.insert(x)).collect();
+
+        // iterate over all the values and make sure they match
+        let values_match = (0..10)
+            .zip(allocator.iter_values())
+            .map(|(x, y)| x == *y)
+            .fold(true, |prev, cur| prev && cur);
+        assert!(values_match);
+
+        // now free the key at index 4 and make sure it's skipped
+        allocator.free(keys[3]).unwrap();
+        let values_match = [0, 1, 2, 4, 5, 6, 7, 8, 9]
+            .iter()
+            .zip(allocator.iter_values())
+            .map(|(x, y)| *x == *y)
+            .fold(true, |prev, cur| prev && cur);
+        assert!(values_match);
     }
 }

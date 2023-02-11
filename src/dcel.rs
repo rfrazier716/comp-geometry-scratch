@@ -96,7 +96,7 @@ impl DCEL {
                 .map(|(i1, i2)| if requires_flip { (i2, i1) } else { (i1, i2) }) // flip order if required
                 .map(|(p_origin, p_destination)| {
                     // insert our edge into the dcel
-                    let new_edge = dcel.edges.insert(HalfEdge {
+                    let edge_key = dcel.edges.insert(HalfEdge {
                         origin: Some(point_keys[p_origin]),
                         twin: created_edges.get(&(p_destination, p_origin)).copied(),
                         incident_face: Some(face),
@@ -104,16 +104,21 @@ impl DCEL {
                         prev: None,
                     });
                     // track it in our map so we can tell when its twin is created
-                    created_edges.insert((p_origin, p_destination), new_edge);
+                    created_edges.insert((p_origin, p_destination), edge_key);
 
                     // if this edges twin exists, update its twin reference
                     if let Some(twin_key) = created_edges.get(&(p_destination, p_origin)) {
                         if let Some(twin) = dcel.edges.get_mut(twin_key) {
-                            twin.twin = Some(new_edge);
+                            twin.twin = Some(edge_key);
                         }
                     }
 
-                    new_edge
+                    // If this edges origin point does not have an incident edge yet, create it
+                    if let Some(vertex) = dcel.vertices.get_mut(&point_keys[p_origin]) {
+                        vertex.incident_edge.get_or_insert(edge_key);
+                    }
+
+                    edge_key
                 })
                 .collect(); // collect into a vec
 
@@ -167,27 +172,93 @@ impl DCEL {
 #[cfg(test)]
 
 mod tests {
-    use std::collections::HashSet;
-
-    use crate::allocator::AllocatorSlot;
-
     use super::*;
+    use std::collections::HashSet;
     #[test]
-    fn test_tetrahedron() {
-
+    fn test_tetrahedron_vertices() {
         let shape = DCEL::tetrahedron();
 
         // we should have four faces, four points, and 12 half-edges\
-        assert_eq!(shape.faces.len(), 4);
+
         assert_eq!(shape.vertices.len(), 4);
-        assert_eq!(shape.edges.len(), 12);
 
-        // // Every vertex should be associated with a unique edge
-        // let incident_edges: HashSet<Key> = HashSet::from(shape.vertices.iter().filter_map(|x| match x {
-        //     AllocatorSlot::Free(_) => None,
-        //     AllocatorSlot::Occupied(_,val) => Some(val.incident_edge)
-        // }).filter_map(|edge_key| edge_key).collect::<Key>());
-        // assert_eq!(incident_edges.len(), shape.vertices.len())
+        // Every vertex should be associated with a unique edge
+        let incident_edge_set: HashSet<Key> = HashSet::from_iter(
+            shape
+                .vertices
+                .iter_values()
+                .filter_map(|vertex| vertex.incident_edge),
+        );
+        assert_eq!(incident_edge_set.len(), 4); // a set will remove duplicate edges
+    }
+    #[test]
+    fn test_tetrahedron_faces() {
+        let shape = DCEL::tetrahedron();
+        assert_eq!(shape.faces.len(), 4);
 
+        // Every Face should have a unique Edge
+        let face_incident_edge_set: HashSet<Key> = HashSet::from_iter(
+            shape
+                .faces
+                .iter_values()
+                .filter_map(|face| face.primary_edge),
+        );
+        assert_eq!(face_incident_edge_set.len(), 4);
+    }
+    #[test]
+    fn test_tetrahedron_edges() {
+        let shape = DCEL::tetrahedron();
+        assert_eq!(shape.edges.len(), 12); // structure should be packed so we're fine
+
+        for edge_key in shape.edges.iter_keys() {
+            // for each edge, the twin of the twin should be the original edge
+            let twin_key = shape.edges.get(&edge_key).unwrap().twin.unwrap();
+            let twin_of_twin_key = shape.edges.get(&twin_key).unwrap().twin.unwrap();
+            assert_eq!(edge_key, twin_of_twin_key);
+
+            // for each edge, the next of the previous should be the original edge
+            let prev_key = shape.edges.get(&edge_key).and_then(|x| x.prev).unwrap();
+            let next_of_prev_key = shape.edges.get(&prev_key).unwrap().next.unwrap();
+            assert_eq!(edge_key, next_of_prev_key);
+
+            // Since Every Face is a Triangle, if we cycle an edge next three times or previous three times we should get the original edge
+            let third_key_moving_forward = (0..3).fold(edge_key, |prev_key, _| {
+                shape.edges.get(&prev_key).unwrap().next.unwrap()
+            });
+            let third_key_moving_backwards = (0..3).fold(edge_key, |prev_key, _| {
+                shape.edges.get(&prev_key).unwrap().prev.unwrap()
+            });
+            assert_eq!(edge_key, third_key_moving_forward);
+            assert_eq!(edge_key, third_key_moving_backwards);
+        }
+    }
+
+    #[test]
+    fn test_edge_cycle_references_same_face() {
+        let shape = DCEL::tetrahedron();
+        for edge_key in shape.edges.iter_keys() {
+            // The face key for every edge in a cycle should be the same and none-null
+            let edge_face = shape
+                .edges
+                .get(&edge_key)
+                .and_then(|edge| edge.incident_face)
+                .unwrap();
+            let faces_equal = (0..3)
+                .scan(edge_key, |prev_key, _| {
+                    shape
+                        .edges
+                        .get(&prev_key) // get the previous edge
+                        .and_then(|x| x.next) // find the next edge key
+                        .and_then(|edge_key| {
+                            *prev_key = edge_key;
+                            shape.edges.get(&edge_key)
+                        }) // find the next edge
+                        .and_then(|edge| edge.incident_face)
+                })
+                .fold(true, |valid, current_face| {
+                    valid && (edge_face == current_face)
+                });
+            assert!(faces_equal);
+        }
     }
 }
