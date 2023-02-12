@@ -1,6 +1,3 @@
-mod allocator;
-mod dcel;
-
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct Point2D {
     x: f64,
@@ -78,22 +75,22 @@ fn convex_hull(points: &Vec<Point2D>) -> Option<Vec<Point2D>> {
 }
 
 fn main() {
-    let points = vec![
-        Point2D::new(0.0, 3.0),
-        Point2D::new(2.0, 3.0),
-        Point2D::new(1.0, 2.0),
-        Point2D::new(3.0, 2.0),
-        Point2D::new(4.0, 2.0),
-        Point2D::new(2.0, 1.0),
-        Point2D::new(3.0, 1.0),
-        Point2D::new(0.0, 0.0),
-        Point2D::new(2.0, 0.0),
-        Point2D::new(4.0, 0.0),
-        Point2D::new(1.0, -1.0),
-        Point2D::new(5.0, -1.0),
-        Point2D::new(3.0, -2.0),
-    ];
-    println!("{:?}", convex_hull(&points));
+    // let points = vec![
+    //     Point2D::new(0.0, 3.0),
+    //     Point2D::new(2.0, 3.0),
+    //     Point2D::new(1.0, 2.0),
+    //     Point2D::new(3.0, 2.0),
+    //     Point2D::new(4.0, 2.0),
+    //     Point2D::new(2.0, 1.0),
+    //     Point2D::new(3.0, 1.0),
+    //     Point2D::new(0.0, 0.0),
+    //     Point2D::new(2.0, 0.0),
+    //     Point2D::new(4.0, 0.0),
+    //     Point2D::new(1.0, -1.0),
+    //     Point2D::new(5.0, -1.0),
+    //     Point2D::new(3.0, -2.0),
+    // ];
+    // println!("{:?}", convex_hull(&points));
 }
 
 #[cfg(test)]

@@ -7,13 +7,13 @@ pub struct Key {
     pub index: usize,
     pub generation: AllocatorGeneration,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AllocatorSlot<T> {
     Free(AllocatorGeneration),
     Occupied(AllocatorGeneration, T),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Allocator<T> {
     elements: Vec<AllocatorSlot<T>>, // the stored data managed by the allocator
     free_slots: VecDeque<usize>,     // list of the open slots we can insert into
