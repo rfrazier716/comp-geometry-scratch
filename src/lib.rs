@@ -203,7 +203,6 @@ impl DCEL {
         {
             let mut edge_key = Some(primary_edge_key);
             while let Some(key) = edge_key {
-                println!("{:?}", edge_key);
                 result.push(key);
                 edge_key = match self.edges.get(&key.0).and_then(|edge| edge.next) {
                     Some(next_edge) if next_edge == primary_edge_key => None,
@@ -223,10 +222,13 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
     let mut shape = shape.clone(); // clone the original shape
 
     // for ever edge insert a bisecting point, and create a new edge
-    let new_edges: Vec<HalfEdge> = shape
+    let original_edges: Vec<HalfEdgeKey> = shape
         .edges
         .iter_keys()
         .map(|raw_key| HalfEdgeKey(raw_key))
+        .collect();
+    let new_edge_keys: Vec<HalfEdgeKey> = original_edges
+        .into_iter()
         .scan(
             HashMap::<HalfEdgeKey, VertexKey>::new(),
             |bisect_lut, edge_key| {
@@ -267,41 +269,189 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
 
                 // make a new edge that goes from the bisection point to the next edge in the face
                 // We can't insert it into the edges yet - Borrowing Rules?
-                Some(HalfEdge {
+                let new_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
                     origin: Some(bisection_point_key),
                     prev: Some(edge_key),
                     ..*edge
-                })
+                }));
+
+                // point our current edge to this new edge
+                shape.edges.get_mut(&edge_key.0).expect("Err").next = Some(new_edge_key);
+
+                Some(new_edge_key)
             },
         )
         .collect();
 
     // insert the new edges into our shape;
-    let new_edge_keys: Vec<HalfEdgeKey> = new_edges
-        .into_iter()
-        .map(|half_edge| HalfEdgeKey(shape.edges.insert(half_edge)))
-        .collect();
+    // let new_edge_keys: Vec<HalfEdgeKey> = new_edges
+    //     .into_iter()
+    //     .map(|half_edge| HalfEdgeKey(shape.edges.insert(half_edge)))
+    //     .collect();
 
     // stitch together the twins of the edges
     // the the next-edge of a twin to a newly created edge should also be a newly created edge. And it is the twin we should be updating the original edge with
     // For external edges, there won't be a twin (at least how it's currently defined)
+    // we also need to make sure that what the new edges point to as next point to those edges as previous
     for edge_key in new_edge_keys {
-        if let Some(next_of_twin_key) = shape
+        let next_of_twin_key = shape
             .edges
             .get(&edge_key.0)
             .and_then(|edge| edge.twin)
             .and_then(|twin_key| shape.edges.get(&twin_key.0))
             .and_then(|twin| twin.next)
-        {
-            let prev_edge = shape
+            .expect("Expected Edge to have a twin");
+
+        let prev_edge = shape
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.prev)
+            .and_then(|prev_key| shape.edges.get_mut(&prev_key.0))
+            .expect("Expected Key to exist in shape");
+        prev_edge.twin = Some(next_of_twin_key); // fix the previous edges twin
+        prev_edge.next = Some(edge_key); // point the next of the previous edge
+
+        let next_edge = shape
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.next)
+            .and_then(|next_key| shape.edges.get_mut(&next_key.0))
+            .expect("expected key to exist");
+        next_edge.prev = Some(edge_key);
+    }
+
+    // now starting at the new edge (A), advance once (B) and then insert an edge
+    // from b.head to a.tail this will create our new subfaces
+    let original_face_keys: Vec<FaceKey> = shape
+        .faces
+        .iter_keys()
+        .map(|raw_key| FaceKey(raw_key))
+        .collect();
+    for face_key in original_face_keys {
+        // the primary edge for the face is one of our original edges - if we collect that and take every two after we have the
+        // edges that originate at an original vertex
+        let original_edge_keys: Vec<HalfEdgeKey> =
+            shape.find_cycle(&face_key).into_iter().step_by(2).collect();
+
+        // for each original edge key we want to create a new face and an edge and twin to enclose the face
+        // We have to keep track of the twins so we can create a face around them in the end
+        let mut twin_keys = Vec::new();
+        for edge_key in original_edge_keys {
+            let edge_end_vertex_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_edge_key| shape.edges.get(&next_edge_key.0))
+                .and_then(|next_edge| next_edge.origin)
+                .expect("Expected Edge to have a next Edge");
+
+            let prev_edge_key = shape
                 .edges
                 .get(&edge_key.0)
                 .and_then(|edge| edge.prev)
-                .and_then(|prev_key| shape.edges.get_mut(&prev_key.0))
-                .expect("Expected Key to exist in shape");
-            prev_edge.twin = Some(next_of_twin_key); // fix the previous edges twin
-            prev_edge.next = Some(edge_key); // point the next of the previous edge
+                .expect("Expected Edge to have a Previous Edge");
+
+            let prev_edge_origin_key = shape
+                .edges
+                .get(&prev_edge_key.0)
+                .and_then(|edge| edge.origin)
+                .expect("Expected Edge to have an Origin");
+
+            // make our two new edges
+            let enclosing_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
+                origin: Some(edge_end_vertex_key),
+                twin: None,
+                incident_face: None,
+                next: Some(prev_edge_key),
+                prev: Some(edge_key),
+            }));
+
+            let enclosing_edge_twin_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
+                origin: Some(prev_edge_origin_key),
+                twin: Some(enclosing_edge_key),
+                incident_face: None,
+                next: None,
+                prev: None,
+            }));
+
+            twin_keys.push(enclosing_edge_twin_key); // push back the twin key
+
+            // update twin of the enclosing edge
+            shape
+                .edges
+                .get_mut(&enclosing_edge_key.0)
+                .expect("expected Key to exist in shape")
+                .twin = Some(enclosing_edge_twin_key);
+
+            // point our current edge to the enclosing edge
+            shape
+                .edges
+                .get_mut(&edge_key.0)
+                .expect("Expected Key to Exist in Shape")
+                .next = Some(enclosing_edge_key);
+
+            // point the previous of our previous edge to the enclosing edge
+            shape
+                .edges
+                .get_mut(&prev_edge_key.0)
+                .expect("Expected key")
+                .prev = Some(enclosing_edge_key);
+
+            // make a new face and point all three of our edges to it
+            let new_face_key = FaceKey(shape.faces.insert(Face {
+                primary_edge: Some(edge_key),
+            }));
+
+            for key in [prev_edge_key, edge_key, enclosing_edge_key] {
+                shape
+                    .edges
+                    .get_mut(&key.0)
+                    .expect("Expected Key to Exist in Shape")
+                    .incident_face = Some(new_face_key);
+                //println!("{:?}", shape.edges.get(&key.0));
+            }
         }
+        // then we need to make a face from the inner region
+        twin_keys
+            .iter()
+            .fold(Option::<&HalfEdgeKey>::None, |previous_key, key| {
+                // if the previous key was not None, point it to the current key
+                if let Some(previous_key) = previous_key {
+                    shape
+                        .edges
+                        .get_mut(&previous_key.0)
+                        .expect("Expected Key to Exist in Shape")
+                        .next = Some(*key);
+                }
+                shape
+                    .edges
+                    .get_mut(&key.0)
+                    .expect("Expected Key to Exist in Shape")
+                    .prev = previous_key.copied();
+                shape
+                    .edges
+                    .get_mut(&key.0)
+                    .expect("Expected Key to Exist in Shape")
+                    .incident_face = Some(face_key);
+                Some(key)
+            });
+        shape
+            .edges
+            .get_mut(&twin_keys[0].0)
+            .expect("Expected Key to exist in Shape")
+            .prev = Some(twin_keys[2]);
+        shape
+            .edges
+            .get_mut(&twin_keys[2].0)
+            .expect("Expected Key to exist in Shape")
+            .next = Some(twin_keys[0]);
+
+        // remap the incident edge of the original face
+        shape
+            .faces
+            .get_mut(&face_key.0)
+            .expect("Expected Key to Exist in Shape")
+            .primary_edge = Some(twin_keys[0]);
     }
 
     shape
@@ -323,7 +473,7 @@ pub struct VertexBuffer(Vec<Point>);
 #[wasm_bindgen]
 impl VertexBuffer {
     pub fn new() -> Self {
-        DCEL::tetrahedron().generate_vertex_buffer()
+        loop_subdivision(&loop_subdivision(&DCEL::tetrahedron())).generate_vertex_buffer()
     }
 
     pub fn buffer(&self) -> *const Point {
@@ -452,19 +602,37 @@ mod tests {
     fn test_loop_subdivision() {
         let shape = DCEL::tetrahedron();
         let subd = loop_subdivision(&shape);
-        for edge_key in subd.edges.iter_keys().map(|raw_key| HalfEdgeKey(raw_key)){
-            println!("{:?} -> {:?}", edge_key, subd.edges.get(&edge_key.0).and_then(|edge| edge.next)); 
-        }  
-        println!("{:?}", subd.edges);
-        for len in subd
-            .faces
-            .iter_keys()
-            .map(|raw_key| FaceKey(raw_key))
-            .map(|face_key| shape.find_cycle(&face_key))
-            .map(|cycle| cycle.len())
-        {
-            println!("{:?}", len);
+        validate_mesh(&subd);
+    }
+
+    fn validate_mesh(shape: &DCEL) {
+        // the twin of a twin should be itself
+        // the next of the prevoius should be itself
+        for edge_key in shape.edges.iter_keys().map(|raw_key| HalfEdgeKey(raw_key)) {
+            let twin_of_twin_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.twin)
+                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                .and_then(|twin| twin.twin)
+                .unwrap();
+            let previous_of_next_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_key| shape.edges.get(&next_key.0))
+                .and_then(|next| next.prev)
+                .unwrap();
+            let next_of_previous_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.prev)
+                .and_then(|prev_key| shape.edges.get(&prev_key.0))
+                .and_then(|prev| prev.next)
+                .unwrap();
+            assert_eq!(twin_of_twin_key, edge_key);
+            assert_eq!(previous_of_next_key, edge_key);
+            assert_eq!(next_of_previous_key, edge_key);
         }
-        // println!("{:?}", subd.faces);
     }
 }
