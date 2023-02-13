@@ -260,10 +260,12 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
                                 y: 0.5 * (origin.y + endpoint.y),
                                 z: 0.5 * (origin.z + endpoint.z),
                             };
-                            VertexKey(shape.vertices.insert(Vertex {
+                            let new_vertex_key = VertexKey(shape.vertices.insert(Vertex {
                                 position: midpoint_position,
                                 incident_edge: None,
-                            }))
+                            }));
+                            bisect_lut.insert(edge_key, new_vertex_key);
+                            new_vertex_key
                         }
                     };
 
@@ -485,10 +487,11 @@ impl VertexBuffer {
 
 mod tests {
     use super::*;
-    use std::{collections::HashSet, os::linux::raw};
+    use std::collections::HashSet;
     #[test]
     fn test_tetrahedron_vertices() {
         let shape = DCEL::tetrahedron();
+        validate_mesh(&shape);
 
         // we should have four faces, four points, and 12 half-edges\
 
@@ -602,13 +605,17 @@ mod tests {
     fn test_loop_subdivision() {
         let shape = DCEL::tetrahedron();
         let subd = loop_subdivision(&shape);
+        // we expect to now have 16 faces, 15 points and 48 edges
+        assert_eq!(16, subd.faces.len(), "Incorrect Number of Faces");
+        assert_eq!(10, subd.vertices.len(), "Incorrect Number of Vertices");
+        assert_eq!(48, subd.edges.len(), "Incorrect Number of Edges");
+
         validate_mesh(&subd);
     }
 
     fn validate_mesh(shape: &DCEL) {
-        // the twin of a twin should be itself
-        // the next of the prevoius should be itself
         for edge_key in shape.edges.iter_keys().map(|raw_key| HalfEdgeKey(raw_key)) {
+            // the twin of a twin should be itself
             let twin_of_twin_key = shape
                 .edges
                 .get(&edge_key.0)
@@ -616,6 +623,9 @@ mod tests {
                 .and_then(|twin_key| shape.edges.get(&twin_key.0))
                 .and_then(|twin| twin.twin)
                 .unwrap();
+            assert_eq!(twin_of_twin_key, edge_key);
+
+            // the next of the prevoius and prev of next should be itself
             let previous_of_next_key = shape
                 .edges
                 .get(&edge_key.0)
@@ -630,9 +640,73 @@ mod tests {
                 .and_then(|prev_key| shape.edges.get(&prev_key.0))
                 .and_then(|prev| prev.next)
                 .unwrap();
-            assert_eq!(twin_of_twin_key, edge_key);
             assert_eq!(previous_of_next_key, edge_key);
             assert_eq!(next_of_previous_key, edge_key);
+
+            // the edge.origin and edge.twin.next.origin should be the same vertice
+            let edge_origin_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.origin)
+                .unwrap();
+            let twin_next_origin_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.twin)
+                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                .and_then(|twin| twin.next)
+                .and_then(|next_key| shape.edges.get(&next_key.0))
+                .and_then(|next| next.origin)
+                .unwrap();
+            assert_eq!(
+                edge_origin_key,
+                twin_next_origin_key,
+                "edge.origin is at {:?}, but twin.next.origin is {:?}",
+                shape.vertices.get(&edge_origin_key.0).unwrap().position,
+                shape
+                    .vertices
+                    .get(&twin_next_origin_key.0)
+                    .unwrap()
+                    .position
+            );
+
+            // edge.twin.origin and edge.next.origin should be the same vertice
+            let edge_twin_origin_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.twin)
+                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                .and_then(|twin| twin.origin)
+                .unwrap();
+            let edge_next_origin_key = shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_key| shape.edges.get(&next_key.0))
+                .and_then(|next| next.origin)
+                .unwrap();
+            assert_eq!(edge_twin_origin_key, edge_next_origin_key);
+        }
+
+        // every edge in a face cycle should point to that face
+        for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
+            let cycle = shape.find_cycle(&face_key);
+            assert_eq!(3, cycle.len(), "Surface Cycle has wrong number of edges");
+            let all_faces_match = cycle
+                .iter()
+                .map(|edge_key| {
+                    shape
+                        .edges
+                        .get(&edge_key.0)
+                        .and_then(|edge| edge.incident_face)
+                        .unwrap()
+                })
+                .fold(true, |all_same, cur| all_same && (cur == face_key));
+            assert!(
+                all_faces_match,
+                "All edges for face {:?} do not associate with that face",
+                face_key
+            );
         }
     }
 }
