@@ -1,6 +1,6 @@
 pub mod allocator;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
 
 use crate::allocator::{Allocator, Key};
@@ -216,6 +216,112 @@ impl DCEL {
     pub fn find_outgoing_edges(&self, vertex: VertexKey) -> Vec<HalfEdgeKey> {
         todo!()
     }
+
+    pub fn subdivide_edge(&mut self, edge_key: &HalfEdgeKey) -> HalfEdgeKey {
+        // calculate the midpoint from the edge origin and the next origin
+        let origin = self
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.origin)
+            .and_then(|vertex_key| self.vertices.get(&vertex_key.0))
+            .expect("Edge has no corresponding Origin Point")
+            .position;
+
+        let endpoint = self
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.next)
+            .and_then(|next_key| self.edges.get(&next_key.0))
+            .and_then(|next| next.origin)
+            .and_then(|origin_key| self.vertices.get(&origin_key.0))
+            .expect("Expected Valid origin for Edge's twin")
+            .position;
+
+        let midpoint_position = Point {
+            x: 0.5 * (origin.x + endpoint.x),
+            y: 0.5 * (origin.y + endpoint.y),
+            z: 0.5 * (origin.z + endpoint.z),
+        };
+
+        // create a new point in our shape for the midpoint
+        let bisect_point_key = VertexKey(self.vertices.insert(Vertex {
+            position: midpoint_position,
+            incident_edge: None,
+        }));
+
+        // create a new edge coming from the midpoint
+        let bisected_edge_key = HalfEdgeKey(
+            self.edges.insert(HalfEdge {
+                origin: Some(bisect_point_key),
+                prev: Some(*edge_key),
+                ..self
+                    .edges
+                    .get(&edge_key.0)
+                    .copied()
+                    .expect("Could Not Dereferencee Edge")
+            }),
+        );
+
+        // update our bisected edge to point to the new edge
+        self.edges
+            .get_mut(&edge_key.0)
+            .expect("Could Not Dereference Edge")
+            .next = Some(bisected_edge_key);
+        // make edge.next.prev point to edge
+        self.edges
+            .get(&bisected_edge_key.0)
+            .and_then(|edge| edge.next)
+            .and_then(|next_key| self.edges.get_mut(&next_key.0))
+            .expect("Could not Dereference Edge")
+            .prev = Some(bisected_edge_key);
+        self.vertices
+            .get_mut(&bisect_point_key.0)
+            .expect("Could Not Dereference Point")
+            .incident_edge = Some(bisected_edge_key);
+
+        // if our edge has a twin we need to update that twin too
+        if let Some(twin_key) = self.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
+            let bisected_twin_key = HalfEdgeKey(
+                self.edges.insert(HalfEdge {
+                    origin: Some(bisect_point_key),
+                    prev: Some(twin_key),
+                    ..self
+                        .edges
+                        .get(&twin_key.0)
+                        .copied()
+                        .expect("Could not Dereference Edge")
+                }),
+            );
+
+            // point twin.twin to the bisected (non-twin) edge
+            self.edges
+                .get_mut(&twin_key.0)
+                .expect("could not dereference Edge")
+                .twin = Some(bisected_edge_key);
+
+            // point twin.next.prev to twin
+            self.edges
+                .get(&bisected_twin_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_key| self.edges.get_mut(&next_key.0))
+                .expect("Could not Dereference Edge")
+                .prev = Some(bisected_twin_key);
+
+            // update the twin of our original edge
+            self.edges
+                .get_mut(&edge_key.0)
+                .expect("Could not Dereference Edge")
+                .twin = Some(bisected_twin_key);
+
+            // point the old twin key to this new twin edge
+            self.edges
+                .get_mut(&twin_key.0)
+                .expect("Could not dereference edge")
+                .next = Some(bisected_twin_key);
+        }
+
+        bisected_edge_key
+    }
 }
 
 fn loop_subdivision(shape: &DCEL) -> DCEL {
@@ -227,99 +333,66 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
         .iter_keys()
         .map(|raw_key| HalfEdgeKey(raw_key))
         .collect();
+
+    let mut already_bisected_edges: HashSet<HalfEdgeKey> = HashSet::new();
     let new_edge_keys: Vec<HalfEdgeKey> = original_edges
         .into_iter()
-        .scan(
-            HashMap::<HalfEdgeKey, VertexKey>::new(),
-            |bisect_lut, edge_key| {
-                let edge = shape
+        .filter_map(|edge_key| {
+            if !already_bisected_edges.contains(&edge_key) {
+                let bisected_edge_key = shape.subdivide_edge(&edge_key); // bisect the edge
+                already_bisected_edges.insert(edge_key);
+                // if that edge has a twin log it as being bisected too
+                if let Some(bisected_twin_key) = shape
                     .edges
-                    .get(&edge_key.0)
-                    .expect("Edge Key does not Exist in Shape");
-                // check if the edges twin is in the the HashMap
-                let bisection_point_key =
-                    match edge.twin.and_then(|twin_key| bisect_lut.get(&twin_key)) {
-                        Some(bisect_key) => *bisect_key,
-                        None => {
-                            // calculate the mid-point of the edge
-                            let origin = edge
-                                .origin
-                                .and_then(|vertex_key| shape.vertices.get(&vertex_key.0))
-                                .expect("Edge has no corresponding Origin Point")
-                                .position;
-                            let endpoint = edge
-                                .twin
-                                .and_then(|twin_key| shape.edges.get(&twin_key.0))
-                                .and_then(|twin| twin.origin)
-                                .and_then(|origin_key| shape.vertices.get(&origin_key.0))
-                                .expect("Expected Valid origin for Edge's twin")
-                                .position;
-                            // create a new point and insert it into the hashmap with this edge key as the key
-                            let midpoint_position = Point {
-                                x: 0.5 * (origin.x + endpoint.x),
-                                y: 0.5 * (origin.y + endpoint.y),
-                                z: 0.5 * (origin.z + endpoint.z),
-                            };
-                            let new_vertex_key = VertexKey(shape.vertices.insert(Vertex {
-                                position: midpoint_position,
-                                incident_edge: None,
-                            }));
-                            bisect_lut.insert(edge_key, new_vertex_key);
-                            new_vertex_key
-                        }
-                    };
-
-                // make a new edge that goes from the bisection point to the next edge in the face
-                // We can't insert it into the edges yet - Borrowing Rules?
-                let new_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
-                    origin: Some(bisection_point_key),
-                    prev: Some(edge_key),
-                    ..*edge
-                }));
-
-                // point our current edge to this new edge
-                shape.edges.get_mut(&edge_key.0).expect("Err").next = Some(new_edge_key);
-
-                Some(new_edge_key)
-            },
-        )
+                    .get(&bisected_edge_key.0)
+                    .and_then(|edge| edge.twin)
+                {
+                    already_bisected_edges.insert(bisected_twin_key);
+                }
+                Some(bisected_edge_key)
+            } else {
+                None
+            }
+        })
         .collect();
 
-    // insert the new edges into our shape;
-    // let new_edge_keys: Vec<HalfEdgeKey> = new_edges
-    //     .into_iter()
-    //     .map(|half_edge| HalfEdgeKey(shape.edges.insert(half_edge)))
-    //     .collect();
+    // now we're going to divide each six-edge face into two four-edge faces
+    //TODO: Finish this!
+    let original_face_keys: Vec<FaceKey> = shape
+        .faces
+        .iter_keys()
+        .map(|raw_key| FaceKey(raw_key))
+        .collect();
+    for face_key in original_face_keys {
+        let primary_edge = *shape
+            .faces
+            .get(&face_key.0)
+            .and_then(|face| face.primary_edge)
+            .and_then(|edge_key| shape.edges.get(&edge_key.0))
+            .expect("Could not dereference");
 
-    // stitch together the twins of the edges
-    // the the next-edge of a twin to a newly created edge should also be a newly created edge. And it is the twin we should be updating the original edge with
-    // For external edges, there won't be a twin (at least how it's currently defined)
-    // we also need to make sure that what the new edges point to as next point to those edges as previous
-    for edge_key in new_edge_keys {
-        let next_of_twin_key = shape
-            .edges
-            .get(&edge_key.0)
-            .and_then(|edge| edge.twin)
-            .and_then(|twin_key| shape.edges.get(&twin_key.0))
-            .and_then(|twin| twin.next)
-            .expect("Expected Edge to have a twin");
-
-        let prev_edge = shape
-            .edges
-            .get(&edge_key.0)
-            .and_then(|edge| edge.prev)
-            .and_then(|prev_key| shape.edges.get_mut(&prev_key.0))
-            .expect("Expected Key to exist in shape");
-        prev_edge.twin = Some(next_of_twin_key); // fix the previous edges twin
-        prev_edge.next = Some(edge_key); // point the next of the previous edge
-
-        let next_edge = shape
-            .edges
-            .get(&edge_key.0)
-            .and_then(|edge| edge.next)
-            .and_then(|next_key| shape.edges.get_mut(&next_key.0))
-            .expect("expected key to exist");
-        next_edge.prev = Some(edge_key);
+        let mut bisecting_edge = HalfEdge {
+            origin: primary_edge.origin,
+            twin: None,
+            incident_face: None,
+            next: shape
+                .faces
+                .get(&face_key.0)
+                .and_then(|face| face.primary_edge),
+            prev: None,
+        };
+        let mut bistecting_edge_twin = HalfEdge {
+            origin: todo!(),
+            twin: todo!(),
+            incident_face: todo!(),
+            next: todo!(),
+            prev: todo!(),
+        };
+        // find our bisecting edge origin
+        // create two half edges
+        // create a new faces (one for each side of the bisecting edge
+        // stitch the half-edge into the existing face
+        //  update the face
     }
 
     // now starting at the new edge (A), advance once (B) and then insert an edge
@@ -474,10 +547,15 @@ pub struct VertexBuffer(Vec<Point>);
 
 #[wasm_bindgen]
 impl VertexBuffer {
-    pub fn new() -> Self {
-        loop_subdivision(&loop_subdivision(&DCEL::tetrahedron())).generate_vertex_buffer()
+    pub fn new(iterations: u32) -> Self {
+        (0..iterations)
+            .fold(DCEL::tetrahedron(), |prev, _| loop_subdivision(&prev))
+            .generate_vertex_buffer()
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
     pub fn buffer(&self) -> *const Point {
         self.0.as_ptr()
     }
