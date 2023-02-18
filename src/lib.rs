@@ -64,8 +64,157 @@ impl DCEL {
         };
     }
 
+    pub fn triangle() -> Self {
+        let mut dcel = Self::new();
+
+        let face_key = FaceKey(dcel.faces.insert(Face { primary_edge: None }));
+
+        let point_keys: Vec<VertexKey> = [(-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+            .into_iter()
+            .map(|(x, y, z)| {
+                VertexKey(dcel.vertices.insert(Vertex {
+                    position: Point::new(x, y, z),
+                    incident_edge: None,
+                }))
+            })
+            .collect();
+
+        let final_edge_key = point_keys
+            .into_iter()
+            .fold(
+                Option::<HalfEdgeKey>::None,
+                |prev_edge_key, vertex_point_key| {
+                    let new_edge_key = HalfEdgeKey(dcel.edges.insert(HalfEdge {
+                        origin: Some(vertex_point_key),
+                        twin: None,
+                        incident_face: Some(face_key),
+                        next: None,
+                        prev: prev_edge_key,
+                    }));
+                    if let Some(prev_key) = prev_edge_key {
+                        dcel.edges.get_mut(&prev_key.0).unwrap().next = Some(new_edge_key);
+                    }
+                    Some(new_edge_key)
+                },
+            )
+            .unwrap();
+
+        // link the first and last edges together
+        let initial_edge = dcel
+            .edges
+            .get(&final_edge_key.0)
+            .and_then(|edge| edge.prev)
+            .and_then(|prev_key| dcel.edges.get(&prev_key.0))
+            .and_then(|prev| prev.prev)
+            .unwrap();
+
+        dcel.edges.get_mut(&initial_edge.0).unwrap().prev = Some(final_edge_key);
+        dcel.edges.get_mut(&final_edge_key.0).unwrap().next = Some(initial_edge);
+
+        dcel.faces.get_mut(&face_key.0).unwrap().primary_edge = Some(initial_edge);
+
+        dcel
+    }
+
+    pub fn from_vertices(vertices: &[Point], faces: &[(usize, usize, usize)]) -> Self {
+        let mut dcel = DCEL::new();
+
+        // insert the vertices into the shape
+        let point_keys: Vec<VertexKey> = vertices
+            .iter()
+            .map(|vertex| {
+                VertexKey(dcel.vertices.insert(Vertex {
+                    position: *vertex,
+                    incident_edge: None,
+                }))
+            })
+            .collect();
+
+        // create a hashmap to keep track of which half-edges already exist
+        let mut created_edges: HashMap<(usize, usize), HalfEdgeKey> = HashMap::new();
+
+        for (p1, p2, p3) in faces {
+            // Create a new face in our DCEL
+            let face = FaceKey(dcel.faces.insert(Face { primary_edge: None }));
+
+            let edges_to_add = [(*p1, *p2), (*p2, *p3), (*p3, *p1)];
+            // if we've seen any edges from point A->B already, we need to flip the orientation of the triangle
+            // otherwise we'll have duplicate half-edges
+            let requires_flip = edges_to_add
+                .iter()
+                .fold(false, |prev, cur| prev || created_edges.contains_key(cur));
+
+            //Create our half edges and keep the keys so we can reference them later
+            let edge_keys: Vec<HalfEdgeKey> = edges_to_add
+                .into_iter()
+                .map(|(i1, i2)| if requires_flip { (i2, i1) } else { (i1, i2) }) // flip order if required
+                .map(|(p_origin, p_destination)| {
+                    // insert our edge into the dcel
+                    let edge_key = HalfEdgeKey(dcel.edges.insert(HalfEdge {
+                        origin: Some(point_keys[p_origin]),
+                        twin: created_edges.get(&(p_destination, p_origin)).copied(),
+                        incident_face: Some(face),
+                        next: None,
+                        prev: None,
+                    }));
+
+                    // track it in our map so we can tell when its twin is created
+                    created_edges.insert((p_origin, p_destination), edge_key);
+
+                    // if this edges twin exists, update its twin reference
+                    if let Some(twin_key) = created_edges.get(&(p_destination, p_origin)) {
+                        if let Some(twin) = dcel.edges.get_mut(&twin_key.0) {
+                            twin.twin = Some(edge_key);
+                        }
+                    }
+
+                    // If this edges origin point does not have an incident edge yet, create it
+                    if let Some(vertex) = dcel.vertices.get_mut(&point_keys[p_origin].0) {
+                        vertex.incident_edge.get_or_insert(edge_key);
+                    }
+
+                    edge_key
+                })
+                .collect(); // collect into a vec
+
+            // now link together next and prev elements
+            edge_keys.iter().fold(
+                Option::<HalfEdgeKey>::None,
+                |prev_edge_key, current_edge_key| {
+                    // point the previous to the current
+                    if let Some(previous_edge) =
+                        prev_edge_key.and_then(|prev_key| dcel.edges.get_mut(&prev_key.0))
+                    {
+                        previous_edge.next = Some(*current_edge_key);
+                    }
+
+                    // point the current to the previous
+                    if let Some(current_edge) = dcel.edges.get_mut(&current_edge_key.0) {
+                        current_edge.prev = prev_edge_key;
+                    }
+
+                    Some(*current_edge_key) // for the next entry
+                },
+            );
+
+            // we have to manually stitch the first and last edges togeter
+            if let Some(edge) = dcel.edges.get_mut(&edge_keys[0].0) {
+                edge.prev = edge_keys.last().copied();
+            }
+            if let Some(edge) = dcel.edges.get_mut(&edge_keys[2].0) {
+                edge.next = edge_keys.first().copied();
+            }
+
+            // finally - have our created face point to the first edge in our list
+            if let Some(face) = dcel.faces.get_mut(&face.0) {
+                face.primary_edge = Some(edge_keys[0]);
+            }
+        }
+        dcel
+    }
+
     pub fn tetrahedron() -> Self {
-        // DCEL for a Cube Centered at the Origin
+        // DCEL for a tetrahedron Centered at the Origin
         let mut dcel = Self::new();
 
         // create our points that are the corners of the cube
@@ -249,78 +398,239 @@ impl DCEL {
             incident_edge: None,
         }));
 
-        // create a new edge coming from the midpoint
-        let bisected_edge_key = HalfEdgeKey(
-            self.edges.insert(HalfEdge {
-                origin: Some(bisect_point_key),
-                prev: Some(*edge_key),
-                ..self
-                    .edges
-                    .get(&edge_key.0)
-                    .copied()
-                    .expect("Could Not Dereferencee Edge")
-            }),
-        );
+        let original_edge_twin_key = self.edges.get(&edge_key.0).and_then(|edge| edge.twin);
+        let edges_to_split = if original_edge_twin_key.is_some() {
+            vec![*edge_key, original_edge_twin_key.unwrap()]
+        } else {
+            vec![*edge_key]
+        };
 
-        // update our bisected edge to point to the new edge
-        self.edges
-            .get_mut(&edge_key.0)
-            .expect("Could Not Dereference Edge")
-            .next = Some(bisected_edge_key);
-        // make edge.next.prev point to edge
-        self.edges
-            .get(&bisected_edge_key.0)
-            .and_then(|edge| edge.next)
-            .and_then(|next_key| self.edges.get_mut(&next_key.0))
-            .expect("Could not Dereference Edge")
-            .prev = Some(bisected_edge_key);
-        self.vertices
-            .get_mut(&bisect_point_key.0)
-            .expect("Could Not Dereference Point")
-            .incident_edge = Some(bisected_edge_key);
-
-        // if our edge has a twin we need to update that twin too
-        if let Some(twin_key) = self.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
-            let bisected_twin_key = HalfEdgeKey(
+        let mut bisecting_edge_keys: Vec<HalfEdgeKey> = Vec::new();
+        for this_edge in edges_to_split {
+            // create the bisected edge from the midpoint
+            let bisected_edge_key = HalfEdgeKey(
                 self.edges.insert(HalfEdge {
                     origin: Some(bisect_point_key),
-                    prev: Some(twin_key),
+                    prev: Some(this_edge),
                     ..self
                         .edges
-                        .get(&twin_key.0)
+                        .get(&this_edge.0)
                         .copied()
-                        .expect("Could not Dereference Edge")
+                        .expect("Could Not Dereferencee Edge")
+                }),
+            );
+            bisecting_edge_keys.push(bisected_edge_key); // push this into our array so we can reference it later
+
+            // link it into the mesh
+            self.edges
+                .get(&bisected_edge_key.0)
+                .and_then(|edge| edge.prev)
+                .and_then(|prev_key| self.edges.get_mut(&prev_key.0))
+                .unwrap()
+                .next = Some(bisected_edge_key);
+            self.edges
+                .get(&bisected_edge_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_key| self.edges.get_mut(&next_key.0))
+                .unwrap()
+                .prev = Some(bisected_edge_key);
+
+            // now we need to create a new face that so that we still only have three edges per face
+            let rhs_face_key = FaceKey(self.faces.insert(Face {
+                primary_edge: Some(bisected_edge_key),
+            }));
+
+            // update our new edge and the one following to point to this new face
+            // by using fold we also get the origin point of our split edge
+            let split_point_outgoing_edge_key = (0..2)
+                .fold(Some(bisected_edge_key), |prev, _| {
+                    if let Some(edge_key) = prev {
+                        // update the face
+                        self.edges
+                            .get_mut(&edge_key.0)
+                            .expect("expected Edge")
+                            .incident_face = Some(rhs_face_key);
+                        // point to the next edge
+                        self.edges.get(&edge_key.0).and_then(|edge| edge.next)
+                    } else {
+                        None
+                    }
+                })
+                .expect("Expected Iterator to Succeed");
+
+            // create two new edges which split the face
+            let split_edge_key = HalfEdgeKey(self.edges.insert(HalfEdge {
+                twin: None,
+                incident_face: Some(rhs_face_key),
+                next: Some(bisected_edge_key),
+                ..*self.edges.get(&split_point_outgoing_edge_key.0).unwrap()
+            }));
+
+            let split_edge_twin_key = HalfEdgeKey(
+                self.edges.insert(HalfEdge {
+                    origin: Some(bisect_point_key),
+                    twin: Some(split_edge_key),
+                    incident_face: self
+                        .edges
+                        .get(&this_edge.0)
+                        .and_then(|edge| edge.incident_face),
+                    next: Some(split_point_outgoing_edge_key),
+                    prev: Some(this_edge),
                 }),
             );
 
-            // point twin.twin to the bisected (non-twin) edge
+            // link the split edge key into the mesh
+            self.edges.get_mut(&split_edge_key.0).unwrap().twin = Some(split_edge_twin_key);
             self.edges
-                .get_mut(&twin_key.0)
-                .expect("could not dereference Edge")
-                .twin = Some(bisected_edge_key);
-
-            // point twin.next.prev to twin
-            self.edges
-                .get(&bisected_twin_key.0)
+                .get(&split_edge_key.0)
                 .and_then(|edge| edge.next)
                 .and_then(|next_key| self.edges.get_mut(&next_key.0))
-                .expect("Could not Dereference Edge")
-                .prev = Some(bisected_twin_key);
-
-            // update the twin of our original edge
+                .unwrap()
+                .prev = Some(split_edge_key);
             self.edges
-                .get_mut(&edge_key.0)
-                .expect("Could not Dereference Edge")
-                .twin = Some(bisected_twin_key);
+                .get(&split_edge_key.0)
+                .and_then(|edge| edge.prev)
+                .and_then(|prev_key| self.edges.get_mut(&prev_key.0))
+                .unwrap()
+                .next = Some(split_edge_key);
 
-            // point the old twin key to this new twin edge
+            // Link the twin into the mesh
             self.edges
-                .get_mut(&twin_key.0)
-                .expect("Could not dereference edge")
-                .next = Some(bisected_twin_key);
+                .get(&split_edge_twin_key.0)
+                .and_then(|edge| edge.next)
+                .and_then(|next_key| self.edges.get_mut(&next_key.0))
+                .unwrap()
+                .prev = Some(split_edge_twin_key);
+            self.edges
+                .get(&split_edge_twin_key.0)
+                .and_then(|edge| edge.prev)
+                .and_then(|prev_key| self.edges.get_mut(&prev_key.0))
+                .unwrap()
+                .next = Some(split_edge_twin_key);
         }
 
-        bisected_edge_key
+        // lastly if our edge has a twin, we need to fix those references
+        if let Some(twin_key) = original_edge_twin_key {
+            self.edges.get_mut(&edge_key.0).unwrap().twin = bisecting_edge_keys.get(1).copied();
+            self.edges.get_mut(&twin_key.0).unwrap().twin = bisecting_edge_keys.get(0).copied();
+        }
+
+        bisecting_edge_keys[0]
+    }
+
+    pub fn flip_edge(&mut self, edge_key: &HalfEdgeKey) -> Result<HalfEdgeKey, String> {
+        // find your two anchors - which are edge.next and twin.next
+        let twin_key = self
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.twin)
+            .ok_or(String::from("No Twin"))?;
+
+        let mut anchors = [edge_key, &twin_key]
+            .into_iter()
+            .map(|key| self.edges.get(&key.0).and_then(|edge| edge.next).unwrap());
+        let edge_next_key = anchors.next().unwrap();
+        let twin_next_key = anchors.next().unwrap();
+
+        // stitch the corner edges so you have a diamond and disconnect the edges to be flipped
+        
+        // anch_edge.prev = anch_twin.next
+        // anch_twin.next.next = anch_edge
+        let twin_prev_key = self
+            .edges
+            .get(&twin_next_key.0)
+            .and_then(|twin| twin.next)
+            .ok_or(String::from("index Error"))?;
+        self.edges.get_mut(&edge_next_key.0).unwrap().prev = Some(twin_prev_key);
+        self.edges.get_mut(&twin_prev_key.0).unwrap().next = Some(edge_next_key);
+
+        let edge_prev_key = self
+            .edges
+            .get(&edge_next_key.0)
+            .and_then(|edge| edge.next)
+            .ok_or(String::from("index Error"))?;
+        self.edges.get_mut(&twin_next_key.0).unwrap().prev = Some(edge_prev_key);
+        self.edges.get_mut(&edge_prev_key.0).unwrap().next = Some(twin_next_key);
+
+        // at this point we've removed the edges to flip from our cycles and can free them
+        let to_flip_edge = self.edges.free(&edge_key.0)?;
+        let to_flip_twin = self.edges.free(&twin_key.0)?;
+
+        // make two new edges and insert them into the shape
+        let flipped_edge_key = HalfEdgeKey(
+            self.edges.insert(HalfEdge {
+                origin: self
+                    .edges
+                    .get(&twin_prev_key.0)
+                    .and_then(|edge| edge.origin),
+                twin: None,
+                next: Some(edge_prev_key),
+                prev: Some(twin_next_key),
+                ..to_flip_edge
+            }),
+        );
+
+        let flipped_twin_key = HalfEdgeKey(
+            self.edges.insert(HalfEdge {
+                origin: self
+                    .edges
+                    .get(&edge_prev_key.0)
+                    .and_then(|edge| edge.origin),
+                twin: Some(flipped_edge_key),
+                next: Some(twin_prev_key),
+                prev: Some(edge_next_key),
+                ..to_flip_twin
+            }),
+        );
+
+        // close the twin cycle
+        self.edges.get_mut(&flipped_edge_key.0).unwrap().twin = Some(flipped_twin_key);
+
+        // Restitch our cycles together
+        self.edges.get_mut(&twin_next_key.0).unwrap().next = Some(flipped_edge_key);
+        self.edges.get_mut(&edge_prev_key.0).unwrap().prev = Some(flipped_edge_key);
+
+        self.edges.get_mut(&edge_next_key.0).unwrap().next = Some(flipped_twin_key);
+        self.edges.get_mut(&twin_prev_key.0).unwrap().prev = Some(flipped_twin_key);
+
+        // fix the face for edges that have been modified
+        self.edges.get_mut(&edge_next_key.0).unwrap().incident_face = self
+            .edges
+            .get(&flipped_twin_key.0)
+            .and_then(|edge| edge.incident_face);
+        self.edges.get_mut(&twin_next_key.0).unwrap().incident_face = self
+            .edges
+            .get(&flipped_edge_key.0)
+            .and_then(|edge| edge.incident_face);
+
+        // also since we deleted two edges we need to make sure their incident vertices and faces don't accidentally point to them
+        self.edges
+            .get(&edge_next_key.0)
+            .and_then(|edge| edge.origin)
+            .and_then(|origin_key| self.vertices.get_mut(&origin_key.0))
+            .unwrap()
+            .incident_edge = Some(edge_next_key);
+        self.edges
+            .get(&edge_next_key.0)
+            .and_then(|edge| edge.incident_face)
+            .and_then(|face_key| self.faces.get_mut(&face_key.0))
+            .unwrap()
+            .primary_edge = Some(edge_next_key);
+
+        self.edges
+            .get(&twin_next_key.0)
+            .and_then(|edge| edge.origin)
+            .and_then(|origin_key| self.vertices.get_mut(&origin_key.0))
+            .unwrap()
+            .incident_edge = Some(twin_next_key);
+        self.edges
+            .get(&twin_next_key.0)
+            .and_then(|edge| edge.incident_face)
+            .and_then(|face_key| self.faces.get_mut(&face_key.0))
+            .unwrap()
+            .primary_edge = Some(twin_next_key);
+
+        Ok(flipped_edge_key)
     }
 }
 
@@ -335,7 +645,13 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
         .collect();
 
     let mut already_bisected_edges: HashSet<HalfEdgeKey> = HashSet::new();
-    let new_edge_keys: Vec<HalfEdgeKey> = original_edges
+
+    let original_vertex_keys: Vec<VertexKey> = shape
+        .vertices
+        .iter_keys()
+        .map(|raw_key| VertexKey(raw_key))
+        .collect();
+    let new_vertex_keys: Vec<VertexKey> = original_edges
         .into_iter()
         .filter_map(|edge_key| {
             if !already_bisected_edges.contains(&edge_key) {
@@ -349,51 +665,109 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
                 {
                     already_bisected_edges.insert(bisected_twin_key);
                 }
-                Some(bisected_edge_key)
+                shape
+                    .edges
+                    .get(&bisected_edge_key.0)
+                    .and_then(|edge| edge.origin)
             } else {
                 None
             }
         })
         .collect();
 
-    // now we're going to divide each six-edge face into two four-edge faces
-    //TODO: Finish this!
-    let original_face_keys: Vec<FaceKey> = shape
-        .faces
-        .iter_keys()
-        .map(|raw_key| FaceKey(raw_key))
-        .collect();
-    for face_key in original_face_keys {
-        let primary_edge = *shape
-            .faces
-            .get(&face_key.0)
-            .and_then(|face| face.primary_edge)
-            .and_then(|edge_key| shape.edges.get(&edge_key.0))
-            .expect("Could not dereference");
+    // update the vertex position for new keys
 
-        let mut bisecting_edge = HalfEdge {
-            origin: primary_edge.origin,
-            twin: None,
-            incident_face: None,
-            next: shape
-                .faces
-                .get(&face_key.0)
-                .and_then(|face| face.primary_edge),
-            prev: None,
-        };
-        let mut bistecting_edge_twin = HalfEdge {
-            origin: todo!(),
-            twin: todo!(),
-            incident_face: todo!(),
-            next: todo!(),
-            prev: todo!(),
-        };
-        // find our bisecting edge origin
-        // create two half edges
-        // create a new faces (one for each side of the bisecting edge
-        // stitch the half-edge into the existing face
-        //  update the face
-    }
+    // // now we're going to divide each six-edge face into two four-edge faces
+    // //TODO: Finish this!
+    // let original_face_keys: Vec<FaceKey> = shape
+    //     .faces
+    //     .iter_keys()
+    //     .map(|raw_key| FaceKey(raw_key))
+    //     .collect();
+
+    // let mut edges_to_flip = Vec::new(); // these are the edges we need to flip once we finish subdividing
+    // for face_key in original_face_keys {
+    //     // we'll create a new face and use it for the LHS of the face, the RHS will still keep the original face
+    //     let lhs_face_key = FaceKey(shape.faces.insert(Face { primary_edge: None }));
+
+    //     let primary_edge_key = shape
+    //         .faces
+    //         .get(&face_key.0)
+    //         .and_then(|face| face.primary_edge)
+    //         .unwrap();
+
+    //     // iterate over the first half of the face (which now has six-sides) and point each half-edge to the shape
+    //     // by using fold we also get the origin point of our split edge
+    //     let split_point_outgoing_edge = *(0..3)
+    //         .fold(Some(primary_edge_key), |prev, _| {
+    //             if let Some(edge_key) = prev {
+    //                 // update the face
+    //                 shape
+    //                     .edges
+    //                     .get_mut(&edge_key.0)
+    //                     .expect("expected Edge")
+    //                     .incident_face = Some(lhs_face_key);
+    //                 // point to the next edge
+    //                 shape.edges.get(&edge_key.0).and_then(|edge| edge.next)
+    //             } else {
+    //                 None
+    //             }
+    //         })
+    //         .and_then(|next_edge_key| shape.edges.get(&next_edge_key.0))
+    //         .expect("Expected Iterator to Succeed");
+
+    //     // create our two new edges that will bisect the face
+    //     let split_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
+    //         origin: split_point_outgoing_edge.origin,
+    //         twin: None,
+    //         incident_face: Some(lhs_face_key),
+    //         next: Some(primary_edge_key),
+    //         prev: split_point_outgoing_edge.prev,
+    //     }));
+
+    //     let split_edge_twin_key = HalfEdgeKey(
+    //         shape.edges.insert(HalfEdge {
+    //             origin: shape.edges.get(&primary_edge_key.0).unwrap().origin,
+    //             twin: Some(split_edge_key),
+    //             incident_face: Some(face_key),
+    //             next: split_point_outgoing_edge
+    //                 .prev
+    //                 .and_then(|prev_key| shape.edges.get(&prev_key.0))
+    //                 .and_then(|prev| prev.next),
+    //             prev: shape.edges.get(&primary_edge_key.0).unwrap().prev,
+    //         }),
+    //     );
+
+    //     // need to stitch the edges together
+    //     shape.edges.get_mut(&split_edge_key.0).unwrap().twin = Some(split_edge_twin_key); // link the twins
+
+    //     // join the edges on the LHS face
+    //     shape.edges.get_mut(&primary_edge_key.0).unwrap().prev = Some(split_edge_key);
+    //     shape
+    //         .edges
+    //         .get(&split_edge_key.0)
+    //         .and_then(|edge| edge.prev)
+    //         .and_then(|prev_edge_key| shape.edges.get_mut(&prev_edge_key.0))
+    //         .unwrap()
+    //         .next = Some(split_edge_key);
+
+    //     // Join the edges on the RHS face
+    //     shape
+    //         .edges
+    //         .get(&split_edge_twin_key.0)
+    //         .and_then(|edge| edge.next)
+    //         .and_then(|next_key| shape.edges.get_mut(&next_key.0))
+    //         .unwrap()
+    //         .prev = Some(split_edge_twin_key);
+
+    //     shape
+    //         .edges
+    //         .get(&split_edge_twin_key.0)
+    //         .and_then(|edge| edge.prev)
+    //         .and_then(|prev_key| shape.edges.get_mut(&prev_key.0))
+    //         .unwrap()
+    //         .next = Some(split_edge_twin_key);
+    // }
 
     // now starting at the new edge (A), advance once (B) and then insert an edge
     // from b.head to a.tail this will create our new subfaces
@@ -529,6 +903,7 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
             .primary_edge = Some(twin_keys[0]);
     }
 
+    // lastly we need to reposition the vertices
     shape
 }
 
@@ -691,17 +1066,178 @@ mod tests {
         validate_mesh(&subd);
     }
 
+    #[test]
+    fn test_edge_split() {
+        let mut shape = DCEL::triangle();
+        let edges: Vec<HalfEdgeKey> = shape
+            .edges
+            .iter_keys()
+            .map(|raw_key| HalfEdgeKey(raw_key))
+            .collect();
+        let expected_results = vec![(2, 6, 4), (3, 9, 5), (4, 12, 6)];
+
+        for (edge_key, (expected_faces, expected_edges, expected_vertices)) in
+            edges.iter().zip(expected_results.into_iter())
+        {
+            shape.subdivide_edge(edge_key);
+            assert_eq!(shape.faces.len(), expected_faces);
+            assert_eq!(shape.edges.len(), expected_edges);
+            assert_eq!(shape.vertices.len(), expected_vertices);
+
+            for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
+                assert_eq!(shape.find_cycle(&face_key).len(), 3);
+            }
+        }
+
+        // now check if we split an edge with a twin
+        let mut shape = DCEL::triangle();
+        let new_half_edge = shape.subdivide_edge(&HalfEdgeKey(Key {
+            index: 0,
+            generation: 0,
+        }));
+        let edge_with_twin = shape
+            .edges
+            .get(&new_half_edge.0)
+            .and_then(|edge| edge.prev)
+            .unwrap();
+        shape.subdivide_edge(&edge_with_twin);
+
+        // we would expect 4 faces, 12 edges, but only 5 vertices
+        assert_eq!(shape.faces.len(), 4);
+        assert_eq!(shape.edges.len(), 12);
+        assert_eq!(shape.vertices.len(), 5);
+
+        for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
+            assert_eq!(shape.find_cycle(&face_key).len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_edge_flip() {
+        // make a diamond with a twin in the middle
+        let vertices: Vec<Point> = [
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| Point { x, y, z })
+        .collect();
+
+        let face_indices = vec![(0, 2, 1), (2, 0, 3)];
+
+        let mut shape = DCEL::from_vertices(&vertices, &face_indices);
+
+        let twinned_edges: Vec<HalfEdgeKey> = shape
+            .edges
+            .iter_keys()
+            .map(|raw_key| HalfEdgeKey(raw_key))
+            .filter(|edge_key| {
+                shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.twin)
+                    .is_some()
+            })
+            .collect(); // should have len()=2
+
+        // flip one of the twinned edges
+        shape.flip_edge(&twinned_edges[0]).unwrap();
+
+        // The Mesh should remain valid
+        validate_mesh(&shape);
+
+        // we should still have 6 edges, 4 vertices, and 2 faces
+        assert_eq!(shape.edges.len(), 6);
+        assert_eq!(shape.vertices.len(), 4);
+        assert_eq!(shape.faces.len(), 2);
+
+        // the points making up the flipped edge should now be (0,1,3) and (2,3,1)
+        // e.g the x coordinates of an edge should always be greater than zero or less than zero
+        // quick way to test is to sum up the x coordinates and make sure they're nonzero
+        for face in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
+            let sum_of_x_coords = shape
+                .find_cycle(&face)
+                .iter()
+                .map(|edge_key| {
+                    shape
+                        .edges
+                        .get(&edge_key.0)
+                        .and_then(|edge| edge.origin)
+                        .and_then(|origin_key| shape.vertices.get(&origin_key.0))
+                        .unwrap()
+                        .position
+                        .x
+                })
+                .fold(0.0, |sum, val| sum + val);
+            assert!(sum_of_x_coords > 0.5 || sum_of_x_coords < -0.5);
+        }
+    }
+
     fn validate_mesh(shape: &DCEL) {
         for edge_key in shape.edges.iter_keys().map(|raw_key| HalfEdgeKey(raw_key)) {
-            // the twin of a twin should be itself
-            let twin_of_twin_key = shape
+            // These tests are only done on edges with twins
+            if shape
                 .edges
                 .get(&edge_key.0)
                 .and_then(|edge| edge.twin)
-                .and_then(|twin_key| shape.edges.get(&twin_key.0))
-                .and_then(|twin| twin.twin)
-                .unwrap();
-            assert_eq!(twin_of_twin_key, edge_key);
+                .is_some()
+            {
+                let twin_of_twin_key = shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.twin)
+                    .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                    .and_then(|twin| twin.twin)
+                    .unwrap();
+
+                assert_eq!(twin_of_twin_key, edge_key);
+
+                // the edge.origin and edge.twin.next.origin should be the same vertice
+                let edge_origin_key = shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.origin)
+                    .unwrap();
+                let twin_next_origin_key = shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.twin)
+                    .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                    .and_then(|twin| twin.next)
+                    .and_then(|next_key| shape.edges.get(&next_key.0))
+                    .and_then(|next| next.origin)
+                    .unwrap();
+                assert_eq!(
+                    edge_origin_key,
+                    twin_next_origin_key,
+                    "edge.origin is at {:?}, but twin.next.origin is {:?}",
+                    shape.vertices.get(&edge_origin_key.0).unwrap().position,
+                    shape
+                        .vertices
+                        .get(&twin_next_origin_key.0)
+                        .unwrap()
+                        .position
+                );
+
+                // edge.twin.origin and edge.next.origin should be the same vertice
+                let edge_twin_origin_key = shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.twin)
+                    .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                    .and_then(|twin| twin.origin)
+                    .unwrap();
+                let edge_next_origin_key = shape
+                    .edges
+                    .get(&edge_key.0)
+                    .and_then(|edge| edge.next)
+                    .and_then(|next_key| shape.edges.get(&next_key.0))
+                    .and_then(|next| next.origin)
+                    .unwrap();
+                assert_eq!(edge_twin_origin_key, edge_next_origin_key);
+            }
 
             // the next of the prevoius and prev of next should be itself
             let previous_of_next_key = shape
@@ -720,50 +1256,6 @@ mod tests {
                 .unwrap();
             assert_eq!(previous_of_next_key, edge_key);
             assert_eq!(next_of_previous_key, edge_key);
-
-            // the edge.origin and edge.twin.next.origin should be the same vertice
-            let edge_origin_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.origin)
-                .unwrap();
-            let twin_next_origin_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.twin)
-                .and_then(|twin_key| shape.edges.get(&twin_key.0))
-                .and_then(|twin| twin.next)
-                .and_then(|next_key| shape.edges.get(&next_key.0))
-                .and_then(|next| next.origin)
-                .unwrap();
-            assert_eq!(
-                edge_origin_key,
-                twin_next_origin_key,
-                "edge.origin is at {:?}, but twin.next.origin is {:?}",
-                shape.vertices.get(&edge_origin_key.0).unwrap().position,
-                shape
-                    .vertices
-                    .get(&twin_next_origin_key.0)
-                    .unwrap()
-                    .position
-            );
-
-            // edge.twin.origin and edge.next.origin should be the same vertice
-            let edge_twin_origin_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.twin)
-                .and_then(|twin_key| shape.edges.get(&twin_key.0))
-                .and_then(|twin| twin.origin)
-                .unwrap();
-            let edge_next_origin_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.next)
-                .and_then(|next_key| shape.edges.get(&next_key.0))
-                .and_then(|next| next.origin)
-                .unwrap();
-            assert_eq!(edge_twin_origin_key, edge_next_origin_key);
         }
 
         // every edge in a face cycle should point to that face

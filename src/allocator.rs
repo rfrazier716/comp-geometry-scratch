@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, iter::FilterMap, ops::Deref};
+use std::{collections::VecDeque, iter::FilterMap, ops::Deref, mem};
 
 type AllocatorGeneration = u64;
 
@@ -95,16 +95,32 @@ impl<T> Allocator<T> {
         }
     }
 
-    pub fn free(&mut self, key: Key) -> Result<(), Key> {
+    pub fn free(&mut self, key: &Key) -> Result<T, String> {
         // this will consume the key and remove it from the allocator
         // If it cannot remove the  index, the key is returned as an error
         // TODO: Find a better way to clean this up - returning Err(key) is odd
-        if self.key_is_valid(&key) {
-            self.elements[key.index] = AllocatorSlot::Free(key.generation + 1);
+        if self.key_is_valid(key) {
+            // initialize to_return with the value we will swap into our allocator array
+            let mut to_return = AllocatorSlot::Free(key.generation + 1);
+            mem::swap(&mut to_return, &mut self.elements[key.index]); // swap it out so we retrieve the value in to_return
             self.free_slots.push_back(key.index); // put the slot into our free slot pool
-            Ok(())
+            match to_return{
+                AllocatorSlot::Occupied(_,val) => Ok(val),
+                _ => unreachable!()
+            }
         } else {
-            Err(key)
+            Err(String::from("Could not Free Slot"))
+        }
+    }
+
+    pub fn next_available_key(&self) -> Key {
+        if let Some(next_open_slot) = self.free_slots.front(){
+            match self.elements[*next_open_slot]{
+                AllocatorSlot::Free(generation) => Key{index: *next_open_slot, generation},
+                AllocatorSlot::Occupied(_,_) => panic!("Tried Allocating into an occupied slot")
+            } 
+        } else {
+            Key{ index: self.elements.len(), generation: 0 }
         }
     }
 
@@ -195,7 +211,7 @@ mod tests {
         let new_value = 47.5;
         let mut allocator = Allocator::new();
         let key = allocator.insert(original_value);
-        allocator.free(key).unwrap(); // free the key so we can reuse the slot
+        allocator.free(&key).unwrap(); // free the key so we can reuse the slot
         let key = allocator.insert(new_value);
 
         // assert the new value is stored
@@ -225,12 +241,28 @@ mod tests {
         assert!(values_match);
 
         // now free the key at index 4 and make sure it's skipped
-        allocator.free(keys[3]).unwrap();
+        allocator.free(&keys[3]).unwrap();
         let values_match = [0, 1, 2, 4, 5, 6, 7, 8, 9]
             .iter()
             .zip(allocator.iter_values())
             .map(|(x, y)| *x == *y)
             .fold(true, |prev, cur| prev && cur);
         assert!(values_match);
+    }
+
+    #[test]
+    fn test_key_peek() {
+        let mut alloc = Allocator::<usize>::new(); // make an empty allocator
+        assert_eq!(alloc.next_available_key(), Key{index: 0, generation: 0}); // our next available key should be the zero index
+        
+        // push some elements back into the allocator
+        let keys: Vec<Key> = (0..3).map(|element| alloc.insert(element)).collect();
+        assert_eq!(alloc.next_available_key(), Key{index: 3, generation: 0});
+        
+        // pop an element and validate the next available key
+        alloc.free(&keys[0]).unwrap();
+        assert_eq!(alloc.next_available_key(), Key{index: 0, generation: 1});
+
+
     }
 }
