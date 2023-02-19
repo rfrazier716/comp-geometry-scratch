@@ -533,7 +533,7 @@ impl DCEL {
         let twin_next_key = anchors.next().unwrap();
 
         // stitch the corner edges so you have a diamond and disconnect the edges to be flipped
-        
+
         // anch_edge.prev = anch_twin.next
         // anch_twin.next.next = anch_edge
         let twin_prev_key = self
@@ -637,274 +637,102 @@ impl DCEL {
 fn loop_subdivision(shape: &DCEL) -> DCEL {
     let mut shape = shape.clone(); // clone the original shape
 
-    // for ever edge insert a bisecting point, and create a new edge
-    let original_edges: Vec<HalfEdgeKey> = shape
+    let original_vertices: HashSet<VertexKey> =
+        HashSet::from_iter(shape.vertices.iter_keys().map(|raw_key| VertexKey(raw_key)));
+
+    // Subdivide every edge in the mesh and collect the ones that may need to be flipped
+    let mut subdivided_edges = HashSet::new();
+    let edges_to_split: Vec<HalfEdgeKey> = shape
         .edges
         .iter_keys()
         .map(|raw_key| HalfEdgeKey(raw_key))
         .collect();
 
-    let mut already_bisected_edges: HashSet<HalfEdgeKey> = HashSet::new();
-
-    let original_vertex_keys: Vec<VertexKey> = shape
-        .vertices
-        .iter_keys()
-        .map(|raw_key| VertexKey(raw_key))
-        .collect();
-    let new_vertex_keys: Vec<VertexKey> = original_edges
+    let bisecting_edges: Vec<HalfEdgeKey> = edges_to_split
         .into_iter()
         .filter_map(|edge_key| {
-            if !already_bisected_edges.contains(&edge_key) {
-                let bisected_edge_key = shape.subdivide_edge(&edge_key); // bisect the edge
-                already_bisected_edges.insert(edge_key);
-                // if that edge has a twin log it as being bisected too
-                if let Some(bisected_twin_key) = shape
-                    .edges
-                    .get(&bisected_edge_key.0)
-                    .and_then(|edge| edge.twin)
-                {
-                    already_bisected_edges.insert(bisected_twin_key);
+            if !subdivided_edges.contains(&edge_key) {
+                // put this edge and it's twin into the set
+                subdivided_edges.insert(edge_key);
+                if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
+                    subdivided_edges.insert(twin_key);
                 }
-                shape
-                    .edges
-                    .get(&bisected_edge_key.0)
-                    .and_then(|edge| edge.origin)
+                // subdivide the edge
+                let new_edge_key = shape.subdivide_edge(&edge_key);
+                // get the primary and twin bisecting edges
+                let primary_bisecting_edge_key = shape
+                            .edges
+                            .get(&new_edge_key.0)
+                            .and_then(|edge| edge.prev);
+                let twin_bisecting_edge_key = shape
+                                .edges
+                                .get(&new_edge_key.0)
+                                .and_then(|edge| edge.twin)
+                                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                                .and_then(|twin| twin.next)
+                                .and_then(|next_key| shape.edges.get(&next_key.0))
+                                .and_then(|next| next.twin);
+                Some([primary_bisecting_edge_key, twin_bisecting_edge_key].into_iter())
+
             } else {
                 None
             }
-        })
-        .collect();
+        }).flatten().filter_map(|edge| edge).collect();
 
-    // update the vertex position for new keys
-
-    // // now we're going to divide each six-edge face into two four-edge faces
-    // //TODO: Finish this!
-    // let original_face_keys: Vec<FaceKey> = shape
-    //     .faces
-    //     .iter_keys()
-    //     .map(|raw_key| FaceKey(raw_key))
-    //     .collect();
-
-    // let mut edges_to_flip = Vec::new(); // these are the edges we need to flip once we finish subdividing
-    // for face_key in original_face_keys {
-    //     // we'll create a new face and use it for the LHS of the face, the RHS will still keep the original face
-    //     let lhs_face_key = FaceKey(shape.faces.insert(Face { primary_edge: None }));
-
-    //     let primary_edge_key = shape
-    //         .faces
-    //         .get(&face_key.0)
-    //         .and_then(|face| face.primary_edge)
-    //         .unwrap();
-
-    //     // iterate over the first half of the face (which now has six-sides) and point each half-edge to the shape
-    //     // by using fold we also get the origin point of our split edge
-    //     let split_point_outgoing_edge = *(0..3)
-    //         .fold(Some(primary_edge_key), |prev, _| {
-    //             if let Some(edge_key) = prev {
-    //                 // update the face
-    //                 shape
-    //                     .edges
-    //                     .get_mut(&edge_key.0)
-    //                     .expect("expected Edge")
-    //                     .incident_face = Some(lhs_face_key);
-    //                 // point to the next edge
-    //                 shape.edges.get(&edge_key.0).and_then(|edge| edge.next)
-    //             } else {
-    //                 None
-    //             }
-    //         })
-    //         .and_then(|next_edge_key| shape.edges.get(&next_edge_key.0))
-    //         .expect("Expected Iterator to Succeed");
-
-    //     // create our two new edges that will bisect the face
-    //     let split_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
-    //         origin: split_point_outgoing_edge.origin,
-    //         twin: None,
-    //         incident_face: Some(lhs_face_key),
-    //         next: Some(primary_edge_key),
-    //         prev: split_point_outgoing_edge.prev,
-    //     }));
-
-    //     let split_edge_twin_key = HalfEdgeKey(
-    //         shape.edges.insert(HalfEdge {
-    //             origin: shape.edges.get(&primary_edge_key.0).unwrap().origin,
-    //             twin: Some(split_edge_key),
-    //             incident_face: Some(face_key),
-    //             next: split_point_outgoing_edge
-    //                 .prev
-    //                 .and_then(|prev_key| shape.edges.get(&prev_key.0))
-    //                 .and_then(|prev| prev.next),
-    //             prev: shape.edges.get(&primary_edge_key.0).unwrap().prev,
-    //         }),
-    //     );
-
-    //     // need to stitch the edges together
-    //     shape.edges.get_mut(&split_edge_key.0).unwrap().twin = Some(split_edge_twin_key); // link the twins
-
-    //     // join the edges on the LHS face
-    //     shape.edges.get_mut(&primary_edge_key.0).unwrap().prev = Some(split_edge_key);
-    //     shape
-    //         .edges
-    //         .get(&split_edge_key.0)
-    //         .and_then(|edge| edge.prev)
-    //         .and_then(|prev_edge_key| shape.edges.get_mut(&prev_edge_key.0))
-    //         .unwrap()
-    //         .next = Some(split_edge_key);
-
-    //     // Join the edges on the RHS face
-    //     shape
-    //         .edges
-    //         .get(&split_edge_twin_key.0)
-    //         .and_then(|edge| edge.next)
-    //         .and_then(|next_key| shape.edges.get_mut(&next_key.0))
-    //         .unwrap()
-    //         .prev = Some(split_edge_twin_key);
-
-    //     shape
-    //         .edges
-    //         .get(&split_edge_twin_key.0)
-    //         .and_then(|edge| edge.prev)
-    //         .and_then(|prev_key| shape.edges.get_mut(&prev_key.0))
-    //         .unwrap()
-    //         .next = Some(split_edge_twin_key);
-    // }
-
-    // now starting at the new edge (A), advance once (B) and then insert an edge
-    // from b.head to a.tail this will create our new subfaces
-    let original_face_keys: Vec<FaceKey> = shape
-        .faces
-        .iter_keys()
-        .map(|raw_key| FaceKey(raw_key))
-        .collect();
-    for face_key in original_face_keys {
-        // the primary edge for the face is one of our original edges - if we collect that and take every two after we have the
-        // edges that originate at an original vertex
-        let original_edge_keys: Vec<HalfEdgeKey> =
-            shape.find_cycle(&face_key).into_iter().step_by(2).collect();
-
-        // for each original edge key we want to create a new face and an edge and twin to enclose the face
-        // We have to keep track of the twins so we can create a face around them in the end
-        let mut twin_keys = Vec::new();
-        for edge_key in original_edge_keys {
-            let edge_end_vertex_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.next)
-                .and_then(|next_edge_key| shape.edges.get(&next_edge_key.0))
-                .and_then(|next_edge| next_edge.origin)
-                .expect("Expected Edge to have a next Edge");
-
-            let prev_edge_key = shape
-                .edges
-                .get(&edge_key.0)
-                .and_then(|edge| edge.prev)
-                .expect("Expected Edge to have a Previous Edge");
-
-            let prev_edge_origin_key = shape
-                .edges
-                .get(&prev_edge_key.0)
-                .and_then(|edge| edge.origin)
-                .expect("Expected Edge to have an Origin");
-
-            // make our two new edges
-            let enclosing_edge_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
-                origin: Some(edge_end_vertex_key),
-                twin: None,
-                incident_face: None,
-                next: Some(prev_edge_key),
-                prev: Some(edge_key),
-            }));
-
-            let enclosing_edge_twin_key = HalfEdgeKey(shape.edges.insert(HalfEdge {
-                origin: Some(prev_edge_origin_key),
-                twin: Some(enclosing_edge_key),
-                incident_face: None,
-                next: None,
-                prev: None,
-            }));
-
-            twin_keys.push(enclosing_edge_twin_key); // push back the twin key
-
-            // update twin of the enclosing edge
-            shape
-                .edges
-                .get_mut(&enclosing_edge_key.0)
-                .expect("expected Key to exist in shape")
-                .twin = Some(enclosing_edge_twin_key);
-
-            // point our current edge to the enclosing edge
-            shape
-                .edges
-                .get_mut(&edge_key.0)
-                .expect("Expected Key to Exist in Shape")
-                .next = Some(enclosing_edge_key);
-
-            // point the previous of our previous edge to the enclosing edge
-            shape
-                .edges
-                .get_mut(&prev_edge_key.0)
-                .expect("Expected key")
-                .prev = Some(enclosing_edge_key);
-
-            // make a new face and point all three of our edges to it
-            let new_face_key = FaceKey(shape.faces.insert(Face {
-                primary_edge: Some(edge_key),
-            }));
-
-            for key in [prev_edge_key, edge_key, enclosing_edge_key] {
-                shape
-                    .edges
-                    .get_mut(&key.0)
-                    .expect("Expected Key to Exist in Shape")
-                    .incident_face = Some(new_face_key);
-                //println!("{:?}", shape.edges.get(&key.0));
-            }
+    // go through all the new edges
+    // if the bisecting edge origin is in our original vertices, flip it!
+    for edge_key in bisecting_edges {
+        if original_vertices.contains(&shape.edges.get(&edge_key.0).and_then(|edge| edge.origin).unwrap()){
+            shape.flip_edge(&edge_key).unwrap();
         }
-        // then we need to make a face from the inner region
-        twin_keys
-            .iter()
-            .fold(Option::<&HalfEdgeKey>::None, |previous_key, key| {
-                // if the previous key was not None, point it to the current key
-                if let Some(previous_key) = previous_key {
-                    shape
-                        .edges
-                        .get_mut(&previous_key.0)
-                        .expect("Expected Key to Exist in Shape")
-                        .next = Some(*key);
-                }
-                shape
-                    .edges
-                    .get_mut(&key.0)
-                    .expect("Expected Key to Exist in Shape")
-                    .prev = previous_key.copied();
-                shape
-                    .edges
-                    .get_mut(&key.0)
-                    .expect("Expected Key to Exist in Shape")
-                    .incident_face = Some(face_key);
-                Some(key)
-            });
-        shape
-            .edges
-            .get_mut(&twin_keys[0].0)
-            .expect("Expected Key to exist in Shape")
-            .prev = Some(twin_keys[2]);
-        shape
-            .edges
-            .get_mut(&twin_keys[2].0)
-            .expect("Expected Key to exist in Shape")
-            .next = Some(twin_keys[0]);
-
-        // remap the incident edge of the original face
-        shape
-            .faces
-            .get_mut(&face_key.0)
-            .expect("Expected Key to Exist in Shape")
-            .primary_edge = Some(twin_keys[0]);
     }
 
-    // lastly we need to reposition the vertices
-    shape
+    //         // we need to investigate if we'll need to flip the bisecting edges, which are edge.prev and edge.twin.next.twin
+    //         // if either of those originate on a vertice that is "original", e.g. was not created based on a subdivision, they need to be subdivided
+    //         let primary_bisecting_edge_key = shape
+    //             .edges
+    //             .get(&new_edge_key.0)
+    //             .and_then(|edge| edge.prev)
+    //             .unwrap();
+    //         let edges_to_investigate = if shape
+    //             .edges
+    //             .get(&new_edge_key.0)
+    //             .and_then(|edge| edge.twin)
+    //             .is_some()
+    //         {
+    //             let twin_bisecting_edge_key = shape
+    //                 .edges
+    //                 .get(&new_edge_key.0)
+    //                 .and_then(|edge| edge.twin)
+    //                 .and_then(|twin_key| shape.edges.get(&twin_key.0))
+    //                 .and_then(|twin| twin.next)
+    //                 .and_then(|next_key| shape.edges.get(&next_key.0))
+    //                 .and_then(|next| next.twin)
+    //                 .unwrap();
+
+    //             vec![primary_bisecting_edge_key, twin_bisecting_edge_key]
+    //         } else {
+    //             vec![primary_bisecting_edge_key]
+    //         };
+    //         Some(edges_to_investigate.into_iter())
+    //     } else {
+    //         None // if this edges twin was already divided, we'll filter it out
+    //     }
+    // })
+
+    // then for every edge in the mesh if edge.origin or edge.next.origin is a vertice created by an edge bisection - flip it!
+    // let mut flipped_edges = HashSet::new();
+    // let edges_to_flip: Vec<HalfEdgeKey> = shape
+    //     .edges
+    //     .iter_keys()
+    //     .map(|raw_key| HalfEdgeKey(raw_key))
+    //     .collect();
+
+    // for edge in edges_to_flip{
+    //     if !
+    // }
+
+    return shape;
 }
 
 #[wasm_bindgen]
