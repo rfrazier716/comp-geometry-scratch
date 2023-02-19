@@ -362,9 +362,14 @@ impl DCEL {
         result
     }
 
-    pub fn find_outgoing_edges(&self, vertex: VertexKey) -> Vec<HalfEdgeKey> {
-        todo!()
-    }
+    // pub fn find_outgoing_edges(&self, vertex: VertexKey) -> Vec<HalfEdgeKey> {
+    //     let primary_edge_key = self.vertices.get(&vertex.0).and_then(|vertex| vertex.incident_edge).unwrap();
+    //     let mut edge_key = Some(primary_edge_key);
+    //     while let Some(key) = edge_key{
+    //         result.push(key);
+    //         edge_key = match self.edges.get(&)
+    //     }
+    // }
 
     pub fn subdivide_edge(&mut self, edge_key: &HalfEdgeKey) -> HalfEdgeKey {
         // calculate the midpoint from the edge origin and the next origin
@@ -637,112 +642,71 @@ impl DCEL {
 fn loop_subdivision(shape: &DCEL) -> DCEL {
     let mut shape = shape.clone(); // clone the original shape
 
+    // we want to calculate the new coordinates of the vertices before subdiving the mesh or it'll be pretty screwy
+    // first we'll calculate the position of all existing vertices
+
     let original_vertices: HashSet<VertexKey> =
         HashSet::from_iter(shape.vertices.iter_keys().map(|raw_key| VertexKey(raw_key)));
 
-    // Subdivide every edge in the mesh and collect the ones that may need to be flipped
-    let mut subdivided_edges = HashSet::new();
+    let mut seen_edges = HashSet::new();
     let edges_to_split: Vec<HalfEdgeKey> = shape
         .edges
         .iter_keys()
         .map(|raw_key| HalfEdgeKey(raw_key))
+        .filter_map(|edge_key| {
+            seen_edges.insert(edge_key);
+            // check if the shape has a twin and if the twin is already seen, otherwise append
+            if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
+                if !seen_edges.contains(&twin_key) {
+                    Some(edge_key)
+                } else {
+                    None
+                }
+            } else {
+                Some(edge_key)
+            }
+        })
         .collect();
+
+    // Subdivide every edge in the mesh and collect the ones that may need to be flipped
 
     let bisecting_edges: Vec<HalfEdgeKey> = edges_to_split
         .into_iter()
         .filter_map(|edge_key| {
-            if !subdivided_edges.contains(&edge_key) {
-                // put this edge and it's twin into the set
-                subdivided_edges.insert(edge_key);
-                if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
-                    subdivided_edges.insert(twin_key);
-                }
-                // subdivide the edge
-                let new_edge_key = shape.subdivide_edge(&edge_key);
-                // get the primary and twin bisecting edges
-                let primary_bisecting_edge_key = shape
-                            .edges
-                            .get(&new_edge_key.0)
-                            .and_then(|edge| edge.prev);
-                let twin_bisecting_edge_key = shape
-                                .edges
-                                .get(&new_edge_key.0)
-                                .and_then(|edge| edge.twin)
-                                .and_then(|twin_key| shape.edges.get(&twin_key.0))
-                                .and_then(|twin| twin.next)
-                                .and_then(|next_key| shape.edges.get(&next_key.0))
-                                .and_then(|next| next.twin);
-                Some([primary_bisecting_edge_key, twin_bisecting_edge_key].into_iter())
-
-            } else {
-                None
-            }
-        }).flatten().filter_map(|edge| edge).collect();
+            // subdivide the edge
+            let new_edge_key = shape.subdivide_edge(&edge_key);
+            // get the primary and twin bisecting edges
+            let primary_bisecting_edge_key =
+                shape.edges.get(&new_edge_key.0).and_then(|edge| edge.prev);
+            let twin_bisecting_edge_key = shape
+                .edges
+                .get(&new_edge_key.0)
+                .and_then(|edge| edge.twin)
+                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                .and_then(|twin| twin.next)
+                .and_then(|next_key| shape.edges.get(&next_key.0))
+                .and_then(|next| next.twin);
+            Some([primary_bisecting_edge_key, twin_bisecting_edge_key].into_iter())
+        })
+        .flatten()
+        .filter_map(|edge| edge)
+        .collect();
 
     // go through all the new edges
     // if the bisecting edge origin is in our original vertices, flip it!
     for edge_key in bisecting_edges {
-        if original_vertices.contains(&shape.edges.get(&edge_key.0).and_then(|edge| edge.origin).unwrap()){
+        if original_vertices.contains(
+            &shape
+                .edges
+                .get(&edge_key.0)
+                .and_then(|edge| edge.origin)
+                .unwrap(),
+        ) {
             shape.flip_edge(&edge_key).unwrap();
         }
     }
 
-    //         // we need to investigate if we'll need to flip the bisecting edges, which are edge.prev and edge.twin.next.twin
-    //         // if either of those originate on a vertice that is "original", e.g. was not created based on a subdivision, they need to be subdivided
-    //         let primary_bisecting_edge_key = shape
-    //             .edges
-    //             .get(&new_edge_key.0)
-    //             .and_then(|edge| edge.prev)
-    //             .unwrap();
-    //         let edges_to_investigate = if shape
-    //             .edges
-    //             .get(&new_edge_key.0)
-    //             .and_then(|edge| edge.twin)
-    //             .is_some()
-    //         {
-    //             let twin_bisecting_edge_key = shape
-    //                 .edges
-    //                 .get(&new_edge_key.0)
-    //                 .and_then(|edge| edge.twin)
-    //                 .and_then(|twin_key| shape.edges.get(&twin_key.0))
-    //                 .and_then(|twin| twin.next)
-    //                 .and_then(|next_key| shape.edges.get(&next_key.0))
-    //                 .and_then(|next| next.twin)
-    //                 .unwrap();
-
-    //             vec![primary_bisecting_edge_key, twin_bisecting_edge_key]
-    //         } else {
-    //             vec![primary_bisecting_edge_key]
-    //         };
-    //         Some(edges_to_investigate.into_iter())
-    //     } else {
-    //         None // if this edges twin was already divided, we'll filter it out
-    //     }
-    // })
-
-    // then for every edge in the mesh if edge.origin or edge.next.origin is a vertice created by an edge bisection - flip it!
-    // let mut flipped_edges = HashSet::new();
-    // let edges_to_flip: Vec<HalfEdgeKey> = shape
-    //     .edges
-    //     .iter_keys()
-    //     .map(|raw_key| HalfEdgeKey(raw_key))
-    //     .collect();
-
-    // for edge in edges_to_flip{
-    //     if !
-    // }
-
     return shape;
-}
-
-#[wasm_bindgen]
-extern "C" {
-    fn alert(s: &str);
-}
-
-#[wasm_bindgen]
-pub fn greet() {
-    alert("Hello, wasm-game-of-life!");
 }
 
 #[wasm_bindgen]

@@ -13,7 +13,7 @@ document.body.appendChild( renderer.domElement );
 camera.position.z = 5;
 
 
-let tetrahedron = wasm.VertexBuffer.new(5);
+let tetrahedron = wasm.VertexBuffer.new(3);
 console.log(tetrahedron.len())
 const vertices = new Float32Array(memory.buffer, tetrahedron.buffer(), 3*tetrahedron.len());
 const geometry = new THREE.BufferGeometry();
