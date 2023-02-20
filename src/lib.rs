@@ -1,6 +1,9 @@
 pub mod allocator;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    f64::consts::E,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::allocator::{Allocator, Key};
@@ -25,6 +28,11 @@ impl Point {
     pub fn new(x: f32, y: f32, z: f32) -> Self {
         Point { x, y, z }
     }
+}
+
+enum OutgoingEdgeList {
+    ContinuousEdgeList(Vec<HalfEdgeKey>),
+    BoundaryEdgeList(Vec<HalfEdgeKey>),
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -326,9 +334,9 @@ impl DCEL {
     pub fn generate_vertex_buffer(&self) -> VertexBuffer {
         VertexBuffer(
             self.faces
-                .iter_keys()
-                .map(|face_key| {
-                    self.find_cycle(&FaceKey(face_key))
+                .iter_values()
+                .map(|face| {
+                    self.find_cycle(&face.primary_edge.unwrap())
                         .into_iter()
                         .filter_map(|edge_key| {
                             self.edges
@@ -343,33 +351,47 @@ impl DCEL {
         )
     }
 
-    pub fn find_cycle(&self, face_key: &FaceKey) -> Vec<HalfEdgeKey> {
+    pub fn find_cycle(&self, initial_ege_key: &HalfEdgeKey) -> Vec<HalfEdgeKey> {
         let mut result = Vec::new();
-        if let Some(primary_edge_key) = self
-            .faces
-            .get(&face_key.0)
-            .and_then(|face| face.primary_edge)
-        {
-            let mut edge_key = Some(primary_edge_key);
-            while let Some(key) = edge_key {
-                result.push(key);
-                edge_key = match self.edges.get(&key.0).and_then(|edge| edge.next) {
-                    Some(next_edge) if next_edge == primary_edge_key => None,
-                    other => other,
-                };
-            }
+        let mut edge_key = Some(*initial_ege_key);
+        while let Some(key) = edge_key {
+            result.push(key);
+            edge_key = match self.edges.get(&key.0).and_then(|edge| edge.next) {
+                Some(next_edge) if next_edge == *initial_ege_key => None,
+                other => other,
+            };
         }
         result
     }
 
-    // pub fn find_outgoing_edges(&self, vertex: VertexKey) -> Vec<HalfEdgeKey> {
-    //     let primary_edge_key = self.vertices.get(&vertex.0).and_then(|vertex| vertex.incident_edge).unwrap();
-    //     let mut edge_key = Some(primary_edge_key);
-    //     while let Some(key) = edge_key{
-    //         result.push(key);
-    //         edge_key = match self.edges.get(&)
-    //     }
-    // }
+    fn find_outgoing_edges(&self, vertex_key: &VertexKey) -> OutgoingEdgeList {
+        let mut result = Vec::new();
+        let initial_edge_key = self
+            .vertices
+            .get(&vertex_key.0)
+            .and_then(|vertex| vertex.incident_edge)
+            .unwrap();
+        let mut edge_key = Some(initial_edge_key);
+
+        // move forward until we either hit an edge with no twin, or we've done a complete cycle
+        while let Some(key) = edge_key {
+            result.push(key); // push the key onto the list of outgoing edges
+
+            // if there's no twin, break the cycle
+            // if there is a twin, and twin.next == initial, break the cycle
+            // otherwise continue cycling
+            edge_key = if let Some(twin_key) = self.edges.get(&key.0).and_then(|edge| edge.twin) {
+                match self.edges.get(&twin_key.0).and_then(|twin| twin.next) {
+                    Some(next_edge_key) if next_edge_key == initial_edge_key => None,
+                    other => other,
+                }
+            } else {
+                None
+            };
+        }
+        // TODO: fix this for incomplete edges
+        OutgoingEdgeList::ContinuousEdgeList(result)
+    }
 
     pub fn subdivide_edge(&mut self, edge_key: &HalfEdgeKey) -> HalfEdgeKey {
         // calculate the midpoint from the edge origin and the next origin
@@ -378,7 +400,7 @@ impl DCEL {
             .get(&edge_key.0)
             .and_then(|edge| edge.origin)
             .and_then(|vertex_key| self.vertices.get(&vertex_key.0))
-            .expect("Edge has no corresponding Origin Point")
+            .unwrap()
             .position;
 
         let endpoint = self
@@ -388,18 +410,16 @@ impl DCEL {
             .and_then(|next_key| self.edges.get(&next_key.0))
             .and_then(|next| next.origin)
             .and_then(|origin_key| self.vertices.get(&origin_key.0))
-            .expect("Expected Valid origin for Edge's twin")
+            .unwrap()
             .position;
-
-        let midpoint_position = Point {
+        let subdivision_position = Point {
             x: 0.5 * (origin.x + endpoint.x),
             y: 0.5 * (origin.y + endpoint.y),
             z: 0.5 * (origin.z + endpoint.z),
         };
-
         // create a new point in our shape for the midpoint
         let bisect_point_key = VertexKey(self.vertices.insert(Vertex {
-            position: midpoint_position,
+            position: subdivision_position,
             incident_edge: None,
         }));
 
@@ -520,6 +540,8 @@ impl DCEL {
             self.edges.get_mut(&twin_key.0).unwrap().twin = bisecting_edge_keys.get(0).copied();
         }
 
+        // point our new vertex to the bisecting edge
+        self.vertices.get_mut(&bisect_point_key.0).unwrap().incident_edge = Some(bisecting_edge_keys[0]);
         bisecting_edge_keys[0]
     }
 
@@ -639,24 +661,88 @@ impl DCEL {
     }
 }
 
+fn calculate_loop_bisection_point(shape: &DCEL, edge_key: &HalfEdgeKey) -> Point {
+    // calculate the midpoint from the edge origin and the next origin
+    let origin = shape
+        .edges
+        .get(&edge_key.0)
+        .and_then(|edge| edge.origin)
+        .and_then(|vertex_key| shape.vertices.get(&vertex_key.0))
+        .unwrap()
+        .position;
+
+    let endpoint = shape
+        .edges
+        .get(&edge_key.0)
+        .and_then(|edge| edge.next)
+        .and_then(|next_key| shape.edges.get(&next_key.0))
+        .and_then(|next| next.origin)
+        .and_then(|origin_key| shape.vertices.get(&origin_key.0))
+        .unwrap()
+        .position;
+
+    if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
+        // if there's a twin we need to do some diamond averaging
+        // see http://www.cs.cornell.edu/courses/cs4620/2009fa/lectures/01subdivision.pdf
+        let vertex_sum = shape
+            .find_cycle(&edge_key)
+            .into_iter()
+            .chain(shape.find_cycle(&twin_key).into_iter())
+            .fold(
+                (
+                    origin.x + endpoint.x,
+                    origin.y + endpoint.y,
+                    origin.z + endpoint.z,
+                ),
+                |(x_sum, y_sum, z_sum), cycle_key| {
+                    let point = shape
+                        .edges
+                        .get(&cycle_key.0)
+                        .and_then(|edge| edge.origin)
+                        .and_then(|origin_key| shape.vertices.get(&origin_key.0))
+                        .unwrap()
+                        .position;
+                    (x_sum + point.x, y_sum + point.y, z_sum + point.z)
+                },
+            );
+        Point {
+            x: vertex_sum.0 / 8.0,
+            y: vertex_sum.1 / 8.0,
+            z: vertex_sum.2 / 8.0,
+        }
+    } else {
+        // if we don't have a twin key it's just the average of this edges origin and the next edge in the cycle's origin
+
+        Point {
+            x: 0.5 * (origin.x + endpoint.x),
+            y: 0.5 * (origin.y + endpoint.y),
+            z: 0.5 * (origin.z + endpoint.z),
+        }
+    }
+}
+
 fn loop_subdivision(shape: &DCEL) -> DCEL {
-    let mut shape = shape.clone(); // clone the original shape
+    let mut new_shape = shape.clone(); // clone the original shape
 
     // we want to calculate the new coordinates of the vertices before subdiving the mesh or it'll be pretty screwy
     // first we'll calculate the position of all existing vertices
 
-    let original_vertices: HashSet<VertexKey> =
-        HashSet::from_iter(shape.vertices.iter_keys().map(|raw_key| VertexKey(raw_key)));
+    let original_vertices: HashSet<VertexKey> = HashSet::from_iter(
+        new_shape
+            .vertices
+            .iter_keys()
+            .map(|raw_key| VertexKey(raw_key)),
+    );
 
     let mut seen_edges = HashSet::new();
-    let edges_to_split: Vec<HalfEdgeKey> = shape
+    let edges_to_split: Vec<HalfEdgeKey> = new_shape
         .edges
         .iter_keys()
         .map(|raw_key| HalfEdgeKey(raw_key))
         .filter_map(|edge_key| {
             seen_edges.insert(edge_key);
             // check if the shape has a twin and if the twin is already seen, otherwise append
-            if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
+            if let Some(twin_key) = new_shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
                 if !seen_edges.contains(&twin_key) {
                     Some(edge_key)
                 } else {
@@ -669,22 +755,31 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
         .collect();
 
     // Subdivide every edge in the mesh and collect the ones that may need to be flipped
-
     let bisecting_edges: Vec<HalfEdgeKey> = edges_to_split
         .into_iter()
         .filter_map(|edge_key| {
             // subdivide the edge
-            let new_edge_key = shape.subdivide_edge(&edge_key);
+            let new_edge_key = new_shape.subdivide_edge(&edge_key);
+            // update the position based on loop-subdivision rules
+            new_shape
+                .edges
+                .get(&new_edge_key.0)
+                .and_then(|edge| edge.origin)
+                .and_then(|origin_key| new_shape.vertices.get_mut(&origin_key.0))
+                .unwrap()
+                .position = calculate_loop_bisection_point(shape, &edge_key);
             // get the primary and twin bisecting edges
-            let primary_bisecting_edge_key =
-                shape.edges.get(&new_edge_key.0).and_then(|edge| edge.prev);
-            let twin_bisecting_edge_key = shape
+            let primary_bisecting_edge_key = new_shape
+                .edges
+                .get(&new_edge_key.0)
+                .and_then(|edge| edge.prev);
+            let twin_bisecting_edge_key = new_shape
                 .edges
                 .get(&new_edge_key.0)
                 .and_then(|edge| edge.twin)
-                .and_then(|twin_key| shape.edges.get(&twin_key.0))
+                .and_then(|twin_key| new_shape.edges.get(&twin_key.0))
                 .and_then(|twin| twin.next)
-                .and_then(|next_key| shape.edges.get(&next_key.0))
+                .and_then(|next_key| new_shape.edges.get(&next_key.0))
                 .and_then(|next| next.twin);
             Some([primary_bisecting_edge_key, twin_bisecting_edge_key].into_iter())
         })
@@ -696,17 +791,64 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
     // if the bisecting edge origin is in our original vertices, flip it!
     for edge_key in bisecting_edges {
         if original_vertices.contains(
-            &shape
+            &new_shape
                 .edges
                 .get(&edge_key.0)
                 .and_then(|edge| edge.origin)
                 .unwrap(),
         ) {
-            shape.flip_edge(&edge_key).unwrap();
+            new_shape.flip_edge(&edge_key).unwrap();
         }
     }
 
-    return shape;
+    // now for every vertex in our original shape, calculate the new position and adjust it in the new shape
+    for vertex_key in shape.vertices.iter_keys().map(|raw_key| VertexKey(raw_key)) {
+        let vertex_position = shape.vertices.get(&vertex_key.0).unwrap().position;
+        dbg!(vertex_position);
+        let new_position = match shape.find_outgoing_edges(&vertex_key) {
+            OutgoingEdgeList::ContinuousEdgeList(edges) => {
+                let k = edges.len() as f32;
+                let beta = if edges.len() == 3 {
+                    3.0 / 16.0
+                } else {
+                    3.0 / (8.0 * k)
+                };
+                let mid_weight = 1.0 - k * beta;
+                dbg!(k);
+                dbg!(beta);
+                edges.into_iter().fold(
+                    Point {
+                        x: vertex_position.x * mid_weight,
+                        y: vertex_position.y * mid_weight,
+                        z: vertex_position.z * mid_weight,
+                    },
+                    |avg, current_edge| {
+                        let origin_point = shape
+                            .edges
+                            .get(&current_edge.0)
+                            .and_then(|edge| edge.next)
+                            .and_then(|next_key| shape.edges.get(&next_key.0))
+                            .and_then(|edge| edge.origin)
+                            .and_then(|origin_key| shape.vertices.get(&origin_key.0))
+                            .unwrap()
+                            .position;
+                        dbg!(origin_point);
+                        Point {
+                            x: avg.x + origin_point.x * beta,
+                            y: avg.y + origin_point.y * beta,
+                            z: avg.z + origin_point.z * beta,
+                        }
+                    },
+                )
+            }
+            OutgoingEdgeList::BoundaryEdgeList(_) => todo!(),
+        };
+        // update the position in our new shape with these positions
+        dbg!(new_position);
+        new_shape.vertices.get_mut(&vertex_key.0).unwrap().position = new_position;
+    }
+
+    return new_shape;
 }
 
 #[wasm_bindgen]
@@ -849,7 +991,7 @@ mod tests {
     #[test]
     fn test_loop_subdivision() {
         let shape = DCEL::tetrahedron();
-        let subd = loop_subdivision(&shape);
+        let subd = loop_subdivision(&loop_subdivision(&shape));
         // we expect to now have 16 faces, 15 points and 48 edges
         assert_eq!(16, subd.faces.len(), "Incorrect Number of Faces");
         assert_eq!(10, subd.vertices.len(), "Incorrect Number of Vertices");
@@ -876,8 +1018,8 @@ mod tests {
             assert_eq!(shape.edges.len(), expected_edges);
             assert_eq!(shape.vertices.len(), expected_vertices);
 
-            for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
-                assert_eq!(shape.find_cycle(&face_key).len(), 3);
+            for face in shape.faces.iter_values() {
+                assert_eq!(shape.find_cycle(&face.primary_edge.unwrap()).len(), 3);
             }
         }
 
@@ -899,8 +1041,8 @@ mod tests {
         assert_eq!(shape.edges.len(), 12);
         assert_eq!(shape.vertices.len(), 5);
 
-        for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
-            assert_eq!(shape.find_cycle(&face_key).len(), 3);
+        for face in shape.faces.iter_values() {
+            assert_eq!(shape.find_cycle(&face.primary_edge.unwrap()).len(), 3);
         }
     }
 
@@ -948,9 +1090,9 @@ mod tests {
         // the points making up the flipped edge should now be (0,1,3) and (2,3,1)
         // e.g the x coordinates of an edge should always be greater than zero or less than zero
         // quick way to test is to sum up the x coordinates and make sure they're nonzero
-        for face in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
+        for face in shape.faces.iter_values() {
             let sum_of_x_coords = shape
-                .find_cycle(&face)
+                .find_cycle(&face.primary_edge.unwrap())
                 .iter()
                 .map(|edge_key| {
                     shape
@@ -1052,7 +1194,12 @@ mod tests {
 
         // every edge in a face cycle should point to that face
         for face_key in shape.faces.iter_keys().map(|raw_key| FaceKey(raw_key)) {
-            let cycle = shape.find_cycle(&face_key);
+            let primary_edge_key = shape
+                .faces
+                .get(&face_key.0)
+                .and_then(|face| face.primary_edge)
+                .unwrap();
+            let cycle = shape.find_cycle(&primary_edge_key);
             assert_eq!(3, cycle.len(), "Surface Cycle has wrong number of edges");
             let all_faces_match = cycle
                 .iter()
