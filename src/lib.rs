@@ -145,17 +145,24 @@ impl DCEL {
             // Create a new face in our DCEL
             let face = FaceKey(dcel.faces.insert(Face { primary_edge: None }));
 
-            let edges_to_add = [(*p1, *p2), (*p2, *p3), (*p3, *p1)];
+            let mut edges_to_add = [(*p1, *p2), (*p2, *p3), (*p3, *p1)];
             // if we've seen any edges from point A->B already, we need to flip the orientation of the triangle
             // otherwise we'll have duplicate half-edges
             let requires_flip = edges_to_add
                 .iter()
                 .fold(false, |prev, cur| prev || created_edges.contains_key(cur));
 
+            if requires_flip {
+                // if we have the duplicate half edge we need to flip and then swap indices
+                edges_to_add = edges_to_add.map(|(i1, i2)| (i2, i1));
+                let tmp = edges_to_add[0];
+                edges_to_add[0] = edges_to_add[1];
+                edges_to_add[1] = tmp;
+            }
+
             //Create our half edges and keep the keys so we can reference them later
             let edge_keys: Vec<HalfEdgeKey> = edges_to_add
                 .into_iter()
-                .map(|(i1, i2)| if requires_flip { (i2, i1) } else { (i1, i2) }) // flip order if required
                 .map(|(p_origin, p_destination)| {
                     // insert our edge into the dcel
                     let edge_key = HalfEdgeKey(dcel.edges.insert(HalfEdge {
@@ -328,9 +335,7 @@ impl DCEL {
         }
         dcel
     }
-}
 
-impl DCEL {
     pub fn generate_vertex_buffer(&self) -> VertexBuffer {
         VertexBuffer(
             self.faces
@@ -350,7 +355,9 @@ impl DCEL {
                 .collect(),
         )
     }
+}
 
+impl DCEL {
     pub fn find_cycle(&self, initial_ege_key: &HalfEdgeKey) -> Vec<HalfEdgeKey> {
         let mut result = Vec::new();
         let mut edge_key = Some(*initial_ege_key);
@@ -541,7 +548,10 @@ impl DCEL {
         }
 
         // point our new vertex to the bisecting edge
-        self.vertices.get_mut(&bisect_point_key.0).unwrap().incident_edge = Some(bisecting_edge_keys[0]);
+        self.vertices
+            .get_mut(&bisect_point_key.0)
+            .unwrap()
+            .incident_edge = Some(bisecting_edge_keys[0]);
         bisecting_edge_keys[0]
     }
 
@@ -990,8 +1000,22 @@ mod tests {
     }
     #[test]
     fn test_loop_subdivision() {
-        let shape = DCEL::tetrahedron();
-        let subd = loop_subdivision(&loop_subdivision(&shape));
+        // create our points that are the corners of the cube
+        let point_keys: Vec<Point> = [
+            ((8.0 / 9.0f32).sqrt(), 0.0, -1.0 / 3.0),
+            (-(2.0 / 9.0f32).sqrt(), (2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
+            (-(2.0 / 9.0f32).sqrt(), -(2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
+            (0.0, 0.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| Point::new(x, y, z))
+        .collect();
+
+        // faces are references to the vertices
+        let face_indices = [(0, 1, 2), (2, 1, 3), (0, 2, 3), (0, 3, 1)];
+        let shape = DCEL::from_vertices(&point_keys, &face_indices);
+        //let shape = DCEL::tetrahedron();
+        let subd = loop_subdivision(&shape);
         // we expect to now have 16 faces, 15 points and 48 edges
         assert_eq!(16, subd.faces.len(), "Incorrect Number of Faces");
         assert_eq!(10, subd.vertices.len(), "Incorrect Number of Vertices");
