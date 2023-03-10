@@ -56,8 +56,9 @@ struct Face {
     primary_edge: Option<HalfEdgeKey>,
 }
 
+#[wasm_bindgen]
 #[derive(Clone)]
-struct DCEL {
+pub struct DCEL {
     vertices: Allocator<Vertex>,
     edges: Allocator<HalfEdge>,
     faces: Allocator<Face>,
@@ -142,6 +143,7 @@ impl DCEL {
         let mut created_edges: HashMap<(usize, usize), HalfEdgeKey> = HashMap::new();
 
         for (p1, p2, p3) in faces {
+            dbg!((p1, p2, p3));
             // Create a new face in our DCEL
             let face = FaceKey(dcel.faces.insert(Face { primary_edge: None }));
 
@@ -153,6 +155,7 @@ impl DCEL {
                 .fold(false, |prev, cur| prev || created_edges.contains_key(cur));
 
             if requires_flip {
+                println!("need to flip edges {:?}", edges_to_add.clone());
                 // if we have the duplicate half edge we need to flip and then swap indices
                 edges_to_add = edges_to_add.map(|(i1, i2)| (i2, i1));
                 let tmp = edges_to_add[0];
@@ -228,112 +231,74 @@ impl DCEL {
         dcel
     }
 
-    pub fn tetrahedron() -> Self {
-        // DCEL for a tetrahedron Centered at the Origin
-        let mut dcel = Self::new();
+    }
 
+#[wasm_bindgen]
+impl DCEL {
+    pub fn cube() -> Self {
+        let vertices: Vec<Point> = [
+            (-1.0, -1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| Point::new(x, y, z))
+        .collect();
+
+        let faces = [
+            (8,3,2),
+            (8,2,0),
+            (8,0,1),
+            (8,1,3),
+            (9,2,6),
+            (9,6,4),
+            (9,4,0),
+            (9,0,2),
+            (10,6,7),
+            (10,7,5),
+            (10,5,4),
+            (10,4,6),
+            (11,7,3),
+            (11,3,1),
+            (11,1,5),
+            (11,5,7),
+            (12,6,2),
+            (12,2,3),
+            (12,3,7),
+            (12,7,6),
+            (13,1,0),
+            (13,0,4),
+            (13,4,5),
+            (13,5,1),
+        ];
+        DCEL::from_vertices(&vertices, &faces)
+    }
+    pub fn tetrahedron() -> Self {
         // create our points that are the corners of the cube
-        let point_keys: Vec<VertexKey> = [
+        let vertices: Vec<Point> = [
             ((8.0 / 9.0f32).sqrt(), 0.0, -1.0 / 3.0),
             (-(2.0 / 9.0f32).sqrt(), (2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
             (-(2.0 / 9.0f32).sqrt(), -(2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
             (0.0, 0.0, 1.0),
         ]
         .into_iter()
-        .map(|(x, y, z)| {
-            VertexKey(dcel.vertices.insert(Vertex {
-                position: Point::new(x, y, z),
-                incident_edge: None,
-            }))
-        })
+        .map(|(x, y, z)| Point::new(x, y, z))
         .collect();
 
         // faces are references to the vertices
-        let face_indices = [[0, 1, 2], [2, 1, 3], [0, 2, 3], [0, 3, 1]];
-
-        // create a hashmap to keep track of which half-edges already exist
-        let mut created_edges: HashMap<(usize, usize), HalfEdgeKey> = HashMap::new();
-
-        for face_vertices in face_indices {
-            // Create a new face in our DCEL
-            let face = FaceKey(dcel.faces.insert(Face { primary_edge: None }));
-
-            let edges_to_add = (0..3).map(|i| match i {
-                2 => (face_vertices[i], face_vertices[0]),
-                _ => (face_vertices[i], face_vertices[i + 1]),
-            });
-            // if we've seen any edges from point A->B already, we need to flip the orientation of the triangle
-            // otherwise we'll have duplicate half-edges
-            let requires_flip = edges_to_add
-                .clone()
-                .fold(false, |prev, cur| prev || created_edges.contains_key(&cur));
-
-            //Create our half edges and keep the keys so we can reference them later
-            let edge_keys: Vec<HalfEdgeKey> = edges_to_add
-                .map(|(i1, i2)| if requires_flip { (i2, i1) } else { (i1, i2) }) // flip order if required
-                .map(|(p_origin, p_destination)| {
-                    // insert our edge into the dcel
-                    let edge_key = HalfEdgeKey(dcel.edges.insert(HalfEdge {
-                        origin: Some(point_keys[p_origin]),
-                        twin: created_edges.get(&(p_destination, p_origin)).copied(),
-                        incident_face: Some(face),
-                        next: None,
-                        prev: None,
-                    }));
-
-                    // track it in our map so we can tell when its twin is created
-                    created_edges.insert((p_origin, p_destination), edge_key);
-
-                    // if this edges twin exists, update its twin reference
-                    if let Some(twin_key) = created_edges.get(&(p_destination, p_origin)) {
-                        if let Some(twin) = dcel.edges.get_mut(&twin_key.0) {
-                            twin.twin = Some(edge_key);
-                        }
-                    }
-
-                    // If this edges origin point does not have an incident edge yet, create it
-                    if let Some(vertex) = dcel.vertices.get_mut(&point_keys[p_origin].0) {
-                        vertex.incident_edge.get_or_insert(edge_key);
-                    }
-
-                    edge_key
-                })
-                .collect(); // collect into a vec
-
-            // now link together next and prev elements
-            edge_keys.iter().fold(
-                Option::<HalfEdgeKey>::None,
-                |prev_edge_key, current_edge_key| {
-                    // point the previous to the current
-                    if let Some(previous_edge) =
-                        prev_edge_key.and_then(|prev_key| dcel.edges.get_mut(&prev_key.0))
-                    {
-                        previous_edge.next = Some(*current_edge_key);
-                    }
-
-                    // point the current to the previous
-                    if let Some(current_edge) = dcel.edges.get_mut(&current_edge_key.0) {
-                        current_edge.prev = prev_edge_key;
-                    }
-
-                    Some(*current_edge_key) // for the next entry
-                },
-            );
-
-            // we have to manually stitch the first and last edges togeter
-            if let Some(edge) = dcel.edges.get_mut(&edge_keys[0].0) {
-                edge.prev = edge_keys.last().copied();
-            }
-            if let Some(edge) = dcel.edges.get_mut(&edge_keys[2].0) {
-                edge.next = edge_keys.first().copied();
-            }
-
-            // finally - have our created face point to the first edge in our list
-            if let Some(face) = dcel.faces.get_mut(&face.0) {
-                face.primary_edge = Some(edge_keys[0]);
-            }
-        }
-        dcel
+        let face_indices = [(0, 1, 2), (2, 1, 3), (0, 2, 3), (0, 3, 1)];
+        return DCEL::from_vertices(&vertices, &face_indices);
     }
 
     pub fn generate_vertex_buffer(&self) -> VertexBuffer {
@@ -355,10 +320,10 @@ impl DCEL {
                 .collect(),
         )
     }
-}
 
+}
 impl DCEL {
-    pub fn find_cycle(&self, initial_ege_key: &HalfEdgeKey) -> Vec<HalfEdgeKey> {
+    fn find_cycle(&self, initial_ege_key: &HalfEdgeKey) -> Vec<HalfEdgeKey> {
         let mut result = Vec::new();
         let mut edge_key = Some(*initial_ege_key);
         while let Some(key) = edge_key {
@@ -382,6 +347,7 @@ impl DCEL {
 
         // move forward until we either hit an edge with no twin, or we've done a complete cycle
         while let Some(key) = edge_key {
+            dbg!(key);
             result.push(key); // push the key onto the list of outgoing edges
 
             // if there's no twin, break the cycle
@@ -400,7 +366,7 @@ impl DCEL {
         OutgoingEdgeList::ContinuousEdgeList(result)
     }
 
-    pub fn subdivide_edge(&mut self, edge_key: &HalfEdgeKey) -> HalfEdgeKey {
+    fn subdivide_edge(&mut self, edge_key: &HalfEdgeKey) -> HalfEdgeKey {
         // calculate the midpoint from the edge origin and the next origin
         let origin = self
             .edges
@@ -555,7 +521,7 @@ impl DCEL {
         bisecting_edge_keys[0]
     }
 
-    pub fn flip_edge(&mut self, edge_key: &HalfEdgeKey) -> Result<HalfEdgeKey, String> {
+    fn flip_edge(&mut self, edge_key: &HalfEdgeKey) -> Result<HalfEdgeKey, String> {
         // find your two anchors - which are edge.next and twin.next
         let twin_key = self
             .edges
@@ -690,7 +656,8 @@ fn calculate_loop_bisection_point(shape: &DCEL, edge_key: &HalfEdgeKey) -> Point
         .and_then(|origin_key| shape.vertices.get(&origin_key.0))
         .unwrap()
         .position;
-
+    dbg!(origin);
+    dbg!(endpoint);
     if let Some(twin_key) = shape.edges.get(&edge_key.0).and_then(|edge| edge.twin) {
         // if there's a twin we need to do some diamond averaging
         // see http://www.cs.cornell.edu/courses/cs4620/2009fa/lectures/01subdivision.pdf
@@ -712,6 +679,7 @@ fn calculate_loop_bisection_point(shape: &DCEL, edge_key: &HalfEdgeKey) -> Point
                         .and_then(|origin_key| shape.vertices.get(&origin_key.0))
                         .unwrap()
                         .position;
+                    dbg!(point);
                     (x_sum + point.x, y_sum + point.y, z_sum + point.z)
                 },
             );
@@ -722,7 +690,7 @@ fn calculate_loop_bisection_point(shape: &DCEL, edge_key: &HalfEdgeKey) -> Point
         }
     } else {
         // if we don't have a twin key it's just the average of this edges origin and the next edge in the cycle's origin
-
+        dbg!("No Twin");
         Point {
             x: 0.5 * (origin.x + endpoint.x),
             y: 0.5 * (origin.y + endpoint.y),
@@ -731,7 +699,8 @@ fn calculate_loop_bisection_point(shape: &DCEL, edge_key: &HalfEdgeKey) -> Point
     }
 }
 
-fn loop_subdivision(shape: &DCEL) -> DCEL {
+#[wasm_bindgen]
+pub fn loop_subdivision(shape: &DCEL) -> DCEL {
     let mut new_shape = shape.clone(); // clone the original shape
 
     // we want to calculate the new coordinates of the vertices before subdiving the mesh or it'll be pretty screwy
@@ -764,21 +733,18 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
         })
         .collect();
 
+    // calculate where the split points will be for these edges
+    let edge_bisection_points: Vec<(HalfEdgeKey, Point)> = edges_to_split
+        .iter()
+        .map(|edge_key| (*edge_key, calculate_loop_bisection_point(&shape, &edge_key)))
+        .collect();
+
     // Subdivide every edge in the mesh and collect the ones that may need to be flipped
     let bisecting_edges: Vec<HalfEdgeKey> = edges_to_split
-        .into_iter()
+        .iter()
         .filter_map(|edge_key| {
             // subdivide the edge
-            let new_edge_key = new_shape.subdivide_edge(&edge_key);
-            // update the position based on loop-subdivision rules
-            new_shape
-                .edges
-                .get(&new_edge_key.0)
-                .and_then(|edge| edge.origin)
-                .and_then(|origin_key| new_shape.vertices.get_mut(&origin_key.0))
-                .unwrap()
-                .position = calculate_loop_bisection_point(shape, &edge_key);
-            // get the primary and twin bisecting edges
+            let new_edge_key = new_shape.subdivide_edge(edge_key);
             let primary_bisecting_edge_key = new_shape
                 .edges
                 .get(&new_edge_key.0)
@@ -812,6 +778,30 @@ fn loop_subdivision(shape: &DCEL) -> DCEL {
     }
 
     // now for every vertex in our original shape, calculate the new position and adjust it in the new shape
+
+    // apply our previously calculated positions to the new edges
+    for (edge_key, bisection_point) in edge_bisection_points {
+        //dbg!(bisection_point);
+        new_shape
+            .edges
+            .get(&edge_key.0)
+            .and_then(|edge| edge.next)
+            .and_then(|next_key| new_shape.edges.get(&next_key.0))
+            .and_then(|next| next.origin)
+            .and_then(|origin_key| new_shape.vertices.get_mut(&origin_key.0))
+            .unwrap()
+            .position = bisection_point;
+    }
+
+    // new_shape
+    //     .edges
+    //     .get(&new_edge_key.0)
+    //     .and_then(|edge| edge.origin)
+    //     .and_then(|origin_key| new_shape.vertices.get_mut(&origin_key.0))
+    //     .unwrap()
+    //     .position = calculate_loop_bisection_point(shape, &edge_key);
+    // get the primary and twin bisecting edges
+
     for vertex_key in shape.vertices.iter_keys().map(|raw_key| VertexKey(raw_key)) {
         let vertex_position = shape.vertices.get(&vertex_key.0).unwrap().position;
         dbg!(vertex_position);
@@ -868,7 +858,7 @@ pub struct VertexBuffer(Vec<Point>);
 impl VertexBuffer {
     pub fn new(iterations: u32) -> Self {
         (0..iterations)
-            .fold(DCEL::tetrahedron(), |prev, _| loop_subdivision(&prev))
+            .fold(DCEL::cube(), |prev, _| loop_subdivision(&prev))
             .generate_vertex_buffer()
     }
 
@@ -880,11 +870,55 @@ impl VertexBuffer {
     }
 }
 
+
+#[wasm_bindgen]
+pub struct Cube {
+    mesh: DCEL,
+    buffer: VertexBuffer
+}
+
+#[wasm_bindgen]
+impl Cube {
+    pub fn new() -> Self{
+        let mesh = DCEL::cube();
+        let buffer = mesh.generate_vertex_buffer();
+        return Cube { mesh, buffer}
+    }
+
+    pub fn subdivide(&mut self) {
+        self.mesh = loop_subdivision(&self.mesh);
+        self.buffer = self.mesh.generate_vertex_buffer();
+    }
+
+    pub fn get_buffer_start(& self) -> *const Point{
+        return self.buffer.buffer()
+    }
+
+    pub fn get_buffer_length(&self) -> usize {
+        return self.buffer.len() * 3
+    }
+}
+
 #[cfg(test)]
 
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn test_cube_edges() {
+        let shape = DCEL::cube();
+        // every edge should have a twin
+        for edge in shape.edges.iter_values(){
+            if edge.twin == None{
+                let start = edge.origin.and_then(|origin_key| shape.vertices.get(&origin_key.0)).unwrap().position;
+                let end = edge.next.and_then(|next_key| shape.edges.get(&next_key.0)).and_then(|next| next.origin)
+                .and_then(|origin_key| shape.vertices.get(&origin_key.0)).unwrap().position;
+                println!("edge missing twin: {:?} -> {:?}", start, end);
+            }
+            //assert_ne!(edge.twin, None)
+        }
+    }
     #[test]
     fn test_tetrahedron_vertices() {
         let shape = DCEL::tetrahedron();
@@ -1000,21 +1034,8 @@ mod tests {
     }
     #[test]
     fn test_loop_subdivision() {
-        // create our points that are the corners of the cube
-        let point_keys: Vec<Point> = [
-            ((8.0 / 9.0f32).sqrt(), 0.0, -1.0 / 3.0),
-            (-(2.0 / 9.0f32).sqrt(), (2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
-            (-(2.0 / 9.0f32).sqrt(), -(2.0 / 3.0f32).sqrt(), -1.0 / 3.0),
-            (0.0, 0.0, 1.0),
-        ]
-        .into_iter()
-        .map(|(x, y, z)| Point::new(x, y, z))
-        .collect();
-
-        // faces are references to the vertices
-        let face_indices = [(0, 1, 2), (2, 1, 3), (0, 2, 3), (0, 3, 1)];
-        let shape = DCEL::from_vertices(&point_keys, &face_indices);
-        //let shape = DCEL::tetrahedron();
+        let shape = DCEL::cube();
+        validate_mesh(&shape);
         let subd = loop_subdivision(&shape);
         // we expect to now have 16 faces, 15 points and 48 edges
         assert_eq!(16, subd.faces.len(), "Incorrect Number of Faces");
