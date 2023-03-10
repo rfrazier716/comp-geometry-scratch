@@ -3,9 +3,16 @@
   <head>
     <meta charset="utf-8">
     <title>Hello wasm-pack!</title>
+    <button id = 'inc'>Increment</button>
+    <button id = 'rst'>Reset</button>
+    <p id="buffer-size">...</p>
   </head>
   <body>
     <noscript>This page contains webassembly and javascript content, please enable javascript in your browser.</noscript>
+    <div id='display'>
+      <div id="stats"></div>
+      <div id="three"></div>
+    </div>
     <script src="./bootstrap.js"></script>
   </body>
 </html>

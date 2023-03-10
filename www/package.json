@@ -28,6 +28,7 @@
   "homepage": "https://github.com/rustwasm/create-wasm-app#readme",
   "dependencies": {
     "dcel-test": "file:../pkg",
+    "stats.js": "^0.17.0",
     "three": "^0.149.0"
   },
   "devDependencies": {
